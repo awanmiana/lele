@@ -63,8 +63,6 @@ Verification:
 - `/tmp/opencode/finworld-venv/bin/python -X faulthandler -m unittest discover -s tests`: 132 tests passed.
 - `/tmp/opencode/finworld-venv/bin/ruff check .`: passed.
 - `/tmp/opencode/finworld-venv/bin/mypy`: passed (13 source files).
-- Fetcher-only unittest run: 53 tests passed. An unnecessary pytest invocation failed because pytest is not installed; no dependency was added.
-
-Contract resolutions: the later optional-corroboration and legal-entity-kind requirements supersede the earlier mandatory relationship and `fund_manager` wording. `warnings` remains a list consistent with existing fetch results; CLI exposes the specified seven keys, while the source API additionally supplies `edges`. Queue item 1 is delivered for manager edges only; child/parent and umbrella traversal remain deferred. Only the seven assigned files changed; no registry, HTTP, importer, analysis or constants changes, and no commit was requested or made.
+- Live `edges` run on the stored GB funds: processed 10, linked 7 (e.g. Fidelity Sterling Corporate Bond Fund → FIL Investment Services (UK) Limited), 3 missing (no published manager; retryable). Edge provenance asserted (source_url ends `/fund-manager`, evidence contains relationship type). Commit `5ade8f7` (with this worklog update).
 
 **Next: queue item 5 — finmap v1.** Implement same-period SEC balance-sheet/money-position views; acceptance is Apple plus one more issuer side by side with no cross-period mixing. Other jurisdiction, sanctions and contact items remain queued.
