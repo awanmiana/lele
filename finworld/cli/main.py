@@ -25,6 +25,7 @@ COMMANDS = {
     "stats": "Registry statistics",
     "countries": "List countries",
     "fetch": "Fetch official source data",
+    "edges": "Build sourced relationships from stored entities",
     "import": "Import local JSON",
     "analyze": "Analyze stored entity data",
     "sentiment": "Record supplied-text sentiment",
@@ -104,6 +105,11 @@ def build_parser():
     fetch.add_argument("--indicator", help="World Bank only (default: NY.GDP.MKTP.CD)")
     fetch.add_argument("--category", choices=("FUND", "SOLE_PROPRIETOR"), default="", help="GLEIF only: entity category; FUND does not identify VC")
     fetch.add_argument("--financials", action="store_true", help="SEC only: latest us-gaap USD facts by max(end, filed), no form/frame preference; 20 MiB cap instead of default 2 MiB; failure aborts ingestion")
+    edges = parsers["edges"]
+    edges.add_argument("--kind", required=True, choices=["fund"])
+    edges.add_argument("--source", required=True, choices=["gleif"])
+    edges.add_argument("--limit", type=_limit, default=25, help="Maximum unlinked local funds, 1..1000 (default: 25)")
+    edges.epilog = "Only stored lei: funds without managed_by out-edges are selected. Missing managers remain eligible for retry; relationship corroboration is optional."
     parsers["import"].add_argument("path", type=_path, metavar="PATH", help="Importer JSON with entities, provenance and relationships")
     sentiment = parsers["sentiment"]
     text = sentiment.add_mutually_exclusive_group(required=True)
@@ -264,6 +270,10 @@ def _dispatch(args):
             return sources.fetch_source(conn, args.source, query=args.query, country=args.country,
                                         limit=args.limit, indicator=args.indicator if args.indicator is not None else "NY.GDP.MKTP.CD",
                                         category=args.category, financials=args.financials)
+        if command == "edges":
+            result = sources.edge_fund_managers(conn, limit=args.limit)
+            return {"source": args.source, "kind": args.kind,
+                    **{key: result[key] for key in ("processed", "linked", "missing", "skipped", "warnings")}}
         if command == "import":
             return importer.import_json(conn, args.path)
         if command == "analyze":
@@ -303,6 +313,10 @@ def _emit(result, args):
         _table(result, ("id", "kind", "name", "country"))
     elif args.command == "sources":
         _table(result, ("id", "name", "status", "coverage"))
+    elif args.command == "edges":
+        _table(rows=[result], fields=("processed", "linked", "missing", "skipped"))
+        for warning in result["warnings"]:
+            print("Warning: " + _display_cell(warning), file=sys.stderr)
     elif args.command == "relationships":
         _table(result, ("dir", "rel", "other_id", "other_name"))
     elif args.command == "countries":

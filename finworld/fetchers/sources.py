@@ -182,6 +182,110 @@ def _gleif(row, indicator):
     }
 
 
+def _fund_manager_record(payload, fund_lei):
+    payload = _object(payload)
+    row = _object(payload.get("data"))
+    attrs = _object(row.get("attributes"))
+    identifiers = [value for value in (row.get("id"), attrs.get("lei")) if value is not None]
+    if (payload.get("errors") or payload.get("error") or row.get("type") != "lei-records"
+            or not identifiers or any(not isinstance(value, str)
+                                      or not re.fullmatch(r"[A-Z0-9]{18}[0-9]{2}", value)
+                                      for value in identifiers)
+            or len(set(identifiers)) != 1 or identifiers[0] == fund_lei):
+        raise ValueError("invalid single manager LEI record")
+    return _gleif({"attributes": {**attrs, "lei": identifiers[0]}}, "")
+
+
+def _fund_manager_relationship(payload, fund_lei, manager_lei):
+    payload = _object(payload)
+    attrs = _object(_object(payload.get("data")).get("attributes"))
+    relationship = _object(attrs.get("relationship"))
+    if (payload.get("errors") or payload.get("error")
+            or relationship.get("type") != "IS_FUND-MANAGED_BY"
+            or relationship.get("status") != "ACTIVE"
+            or _object(relationship.get("startNode")).get("id") != fund_lei
+            or _object(relationship.get("endNode")).get("id") != manager_lei):
+        raise ValueError("invalid manager relationship corroboration")
+    return attrs
+
+
+def edge_fund_managers(conn, limit=25, progress=None) -> dict:
+    if type(limit) is not int or not 1 <= limit <= FETCH_MAX_LIMIT:
+        raise SourceError(f"limit must be an integer from 1 to {FETCH_MAX_LIMIT}.")
+    eligible = "e.kind='fund' AND substr(e.key, 1, 4)='lei:'"
+    linked = "EXISTS (SELECT 1 FROM edges r WHERE r.src_id=e.id AND r.rel='managed_by')"
+    skipped = conn.execute(f"SELECT count(*) FROM entities e WHERE {eligible} AND {linked}").fetchone()[0]
+    funds = conn.execute(
+        f"SELECT e.id, e.key FROM entities e WHERE {eligible} AND NOT {linked} ORDER BY e.id LIMIT ?",
+        (limit,),
+    ).fetchall()
+    result: dict = {"processed": 0, "linked": 0, "missing": 0, "skipped": skipped, "warnings": [], "edges": []}
+    if not funds:
+        return result
+    client = HTTPClient()
+    for fund_id, fund_key in funds:
+        fund_lei = fund_key[4:]
+        url = f"{SOURCES['GLEIF']}/{fund_lei}/fund-manager"
+        result["processed"] += 1
+        try:
+            if not re.fullmatch(r"[A-Z0-9]{18}[0-9]{2}", fund_lei):
+                raise ValueError("invalid local fund LEI")
+            record = _fund_manager_record(client.get_json(url), fund_lei)
+        except (SourceError, ValueError, TypeError):
+            result["missing"] += 1
+            result["warnings"].append(f"{fund_key}: manager unavailable or invalid; no edge stored.")
+        else:
+            observed_at = client.retrieved_at
+            attrs = record.pop("attrs")
+            attrs.update(source="gleif", source_url=url, retrieved_at=observed_at)
+            evidence = f"GLEIF fund-manager subresource {url} publishes manager LEI {record['lei']}"
+            relationship_url = url + "-relationship"
+            corroboration = None
+            try:
+                corroboration = _fund_manager_relationship(client.get_json(relationship_url), fund_lei, record["lei"])
+            except (SourceError, ValueError, TypeError):
+                result["warnings"].append(f"{fund_key}: relationship corroboration unavailable or invalid; using fund-manager record only.")
+            if corroboration is not None:
+                registration = _object(corroboration.get("registration"))
+                status = _text(registration.get("status")) or "unknown"
+                updated = _text(registration.get("lastUpdateDate")) or "unknown"
+                evidence += (f"; GLEIF fund-manager relationship ACTIVE (registration {status}, lastUpdateDate {updated});"
+                             f" type IS_FUND-MANAGED_BY; source_url {relationship_url};"
+                             f" relationship IS_FUND-MANAGED_BY ACTIVE as of {updated}")
+            savepoint = "edges_" + uuid4().hex
+            conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                existing = conn.execute("SELECT kind FROM entities WHERE key=?", (record["key"],)).fetchone()
+                if existing is not None:
+                    record["kind"] = existing[0]
+                manager_id = upsert_entity(conn, **record)
+                for key, value in attrs.items():
+                    set_attr(conn, manager_id, key, value)
+                if corroboration is not None:
+                    for key, value in {
+                        "gleif.fund_manager_relationship": json.dumps(corroboration, ensure_ascii=True, sort_keys=True),
+                        "gleif.fund_manager_relationship.source_url": relationship_url,
+                        "gleif.fund_manager_relationship.retrieved_at": client.retrieved_at,
+                    }.items():
+                        set_attr(conn, fund_id, key, value)
+                edge = {"src_id": fund_id, "rel": "managed_by", "dst_id": manager_id,
+                        "source_url": url, "observed_at": observed_at, "evidence": evidence}
+                add_edge(conn, **edge)
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except Exception as exc:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                if isinstance(exc, sqlite3.Error):
+                    raise SourceError("Registry write failed; fund enrichment rolled back. Check database schema/permissions.") from exc
+                raise
+            result["linked"] += 1
+            result["edges"].append(edge)
+        if progress is not None:
+            progress({key: result[key] for key in ("processed", "linked", "missing", "skipped")})
+    result["warnings"].extend(client.warnings)
+    return result
+
+
 def _fdic(row, indicator):
     data = _object(_object(row).get("data"))
     cert = _integer(data.get("CERT"))

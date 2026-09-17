@@ -36,7 +36,7 @@ Failures/lessons:
 - `git stash` in a compound command was killed by timeout mid-pipeline; stash was left applied-reverted state. Lesson: never compound stash/test/pop in one command.
 - SEC Archives URLs are provenance-only; fetching them 403s without a contact UA (probe-confirmed).
 
-## 2026-09-17 — Session 3 (current): continuity docs + GLEIF relationship probe
+## 2026-09-17 — Session 3: continuity docs + GLEIF relationship probe
 
 Shipped this entry:
 - `DEVELOPMENT_PLAN.md` (this session's main deliverable) and this `WORKLOG.md`.
@@ -48,3 +48,23 @@ Next (exact steps):
 3. End-of-session: update WORKLOG "Next" line, annotate DEVELOPMENT_PLAN, commit.
 
 Session-continuity state at commit time: DEVELOPMENT_PLAN.md, WORKLOG.md (this file), README.md documents section — all committed together with no pending code changes. Tests verified green before the commit. A new session should run `python3 -m unittest discover -s tests` (expect 120 tests), `git log --oneline -5`, then read this Next section.
+
+## 2026-09-17 — Session 4 (current): sourced GLEIF manager edges
+
+Shipped:
+- `edges --kind fund --source gleif --limit 25`, CLI JSON counters/warnings and human counts table; source API also returns edge dictionaries and supports progress callbacks.
+- Bounded local LEI fund selection, skipping all existing outgoing `managed_by` links. Successful funds advance the next batch; missing records remain retryable. Missing/malformed primary responses produce warnings without writes for that fund.
+- Manager identity and primary edge evidence come solely from the fund's `/fund-manager` single lei-record response; newly created managers use `legal_entity` unless category FUND. Existing kinds are preserved. No manager-side record fetch.
+- Optional `/fund-manager-relationship` corroboration validates both endpoint LEIs, `IS_FUND-MANAGED_BY` and ACTIVE; relationship/registration metadata are preserved in fund attributes and edge evidence. Failure falls back to primary evidence. Primary and corroboration retrieval timestamps remain separate; writes use per-fund savepoints.
+- User-provided verified live facts (2026-09-17): `https://api.gleif.org/api/v1/lei-records/254900MSKVGH4SG63N77/fund-manager` returns HTTP 200 single lei-record, manager `5493001JY2KC4SJGF862`, M & G SECURITIES LIMITED. `/fund-manager-relationship` returns relationship type/status and registration status/lastUpdateDate. The existing lei-records allowlist covers both; no live requests were repeated this session. Umbrella links can exist; direct-parent may instead be a reporting exception. Neither is traversed here; management is not ownership.
+- Twelve new offline tests cover provenance, optional fallback, missing/malformed data, batch limits/repeats, LEI validation, category/identity resolution, timestamps, rollback, CLI wiring/JSON/human output and bad arguments.
+
+Verification:
+- `/tmp/opencode/finworld-venv/bin/python -X faulthandler -m unittest discover -s tests`: 132 tests passed.
+- `/tmp/opencode/finworld-venv/bin/ruff check .`: passed.
+- `/tmp/opencode/finworld-venv/bin/mypy`: passed (13 source files).
+- Fetcher-only unittest run: 53 tests passed. An unnecessary pytest invocation failed because pytest is not installed; no dependency was added.
+
+Contract resolutions: the later optional-corroboration and legal-entity-kind requirements supersede the earlier mandatory relationship and `fund_manager` wording. `warnings` remains a list consistent with existing fetch results; CLI exposes the specified seven keys, while the source API additionally supplies `edges`. Queue item 1 is delivered for manager edges only; child/parent and umbrella traversal remain deferred. Only the seven assigned files changed; no registry, HTTP, importer, analysis or constants changes, and no commit was requested or made.
+
+**Next: queue item 5 — finmap v1.** Implement same-period SEC balance-sheet/money-position views; acceptance is Apple plus one more issuer side by side with no cross-period mixing. Other jurisdiction, sanctions and contact items remain queued.

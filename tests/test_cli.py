@@ -92,7 +92,7 @@ class CLITests(unittest.TestCase):
         catalog = self.success("sources")
         self.assertEqual([item["id"] for item in catalog], ["gleif", "fdic", "worldbank", "osfi", "sec"])
         self.assertFalse(self.db.exists())
-        self.assertEqual(set(COMMANDS), {"init", "sources", "list", "show", "stats", "countries", "fetch", "import", "analyze", "sentiment", "relationships", "export", "menu"})
+        self.assertEqual(set(COMMANDS), {"init", "sources", "list", "show", "stats", "countries", "fetch", "edges", "import", "analyze", "sentiment", "relationships", "export", "menu"})
         self.assertEqual(set(MENU_LABELS), (set(COMMANDS) - {"menu"}) | {"help", "back", "quit"})
 
     def test_bounded_limits(self):
@@ -149,6 +149,44 @@ class CLITests(unittest.TestCase):
                 self.assertEqual((status, out), (2, ""))
                 self.assertTrue(err)
                 fetch.assert_not_called()
+
+    def test_edges_dispatch_json_and_human_output(self):
+        result = {"processed": 3, "linked": 2, "missing": 1, "skipped": 4,
+                  "warnings": ["Optional corroboration unavailable"], "edges": []}
+        with patch("finworld.fetchers.sources.edge_fund_managers", return_value=result) as edges:
+            output = self.success("edges", "--kind", "fund", "--source", "gleif")
+            self.assertEqual(set(output), {"source", "kind", "processed", "linked", "missing", "skipped", "warnings"})
+            self.assertEqual(output, {"source": "gleif", "kind": "fund", **{k: v for k, v in result.items() if k != "edges"}})
+            self.assertIsInstance(edges.call_args.args[0], sqlite3.Connection)
+            self.assertEqual(edges.call_args.kwargs, {"limit": 25})
+            status, out, err = self.invoke("edges", "--kind", "fund", "--source", "gleif", "--limit", "1", machine=False)
+            self.assertEqual(status, 0)
+            self.assertEqual(out.splitlines()[0].split(), ["PROCESSED", "LINKED", "MISSING", "SKIPPED"])
+            self.assertEqual(out.splitlines()[1].split(), ["3", "2", "1", "4"])
+            self.assertIn("Optional corroboration unavailable", err)
+            self.assertEqual(edges.call_args.kwargs, {"limit": 1})
+        self.assertEqual(COMMANDS["edges"], "Build sourced relationships from stored entities")
+
+    def test_edges_invalid_arguments_and_help(self):
+        for args in ([], ["--source", "gleif"], ["--kind", "fund"],
+                     ["--kind", "bank", "--source", "gleif"], ["--kind", "fund", "--source", "sec"],
+                     ["--kind", "fund", "--source", "gleif", "--limit", "0"],
+                     ["--kind", "fund", "--source", "gleif", "--limit", "1001"]):
+            with self.subTest(args=args), patch("finworld.fetchers.sources.edge_fund_managers") as edges:
+                status, out, err = self.invoke("edges", *args)
+                self.assertEqual((status, out), (2, ""))
+                self.assertTrue(err)
+                edges.assert_not_called()
+                self.assertFalse(self.db.exists())
+        status, out, err = self.invoke("edges", "--help")
+        self.assertEqual((status, err), (0, ""))
+        self.assertIn("default: 25", out)
+        self.assertIn("corroboration is optional", " ".join(out.split()))
+
+    def test_edges_empty_registry_json(self):
+        result = self.success("edges", "--kind", "fund", "--source", "gleif")
+        self.assertEqual(result, {"source": "gleif", "kind": "fund", "processed": 0,
+                                  "linked": 0, "missing": 0, "skipped": 0, "warnings": []})
 
     def test_fetch_category_financials_choices_and_help(self):
         for source, flags, category, financials in (

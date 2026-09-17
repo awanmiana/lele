@@ -50,6 +50,7 @@ finworld init
 finworld sources
 finworld fetch fdic --limit 25
 finworld fetch gleif --category FUND --country GB --limit 1000
+finworld edges --kind fund --source gleif --limit 25
 finworld fetch sec --query 0000320193 --financials --limit 100
 finworld fetch osfi --country CA --limit 1000
 finworld list --country CA --kind bank_branch --limit 1000
@@ -72,6 +73,16 @@ finworld export --format json --output entities.json --limit 1000
 IDs are local; use `list` to find yours. `list` and `export` default to 50 rows and are bounded views, **not full-database exports**. Export files contain flat entity records, not nested evidence or restorable backups. `show` includes at most 100 recent signals and 50 filings; metrics and immediate relationships are included. JSON analysis can be redirected to a report file using your shell.
 
 Exports require an existing parent directory, refuse overwrite without `--force`, prevent overwriting the active database/journals, and write atomically. CSV formula-like cells are prefixed with an apostrophe. Use a runtime with `os.link` for atomic no-overwrite exports. Exit codes: success `0`, data/network/storage failure `1`, command usage error `2`. JSON results go to stdout; errors and menu prompts go to stderr.
+
+### GLEIF fund-manager edges
+
+`finworld edges --kind fund --source gleif --limit 25` enriches the local registry, not a remote fund search. It selects at most 1–1000 stored `kind=fund` entities with `lei:` keys (default 25), ordered by local ID, excluding any fund with an existing outgoing `managed_by` edge. `skipped` counts all such already-linked local LEI funds, not unselected rows beyond the limit. Repeats advance past linked funds; missing or failed records remain eligible for retry and can occupy subsequent batches.
+
+Only funds whose GLEIF record publishes a manager receive an edge. The `/lei-records/{fund-LEI}/fund-manager` single-record sub-resource supplies the target LEI, legal name, legal-address country and primary evidence URL/time. New managers are `legal_entity` unless their record category is `FUND`; existing entity kinds and the source fund's kind are preserved. No separate manager-side record request is made. Each valid manager record gets one additional, optional `/fund-manager-relationship` request through the existing paced HTTPS client.
+
+Corroboration must match the fund and manager LEIs, `IS_FUND-MANAGED_BY` and `ACTIVE`. When valid, relationship and registration metadata are preserved as JSON in the fund's `gleif.fund_manager_relationship` attribute, with `.source_url` and `.retrieved_at` companion attributes, and appended to edge evidence. Failed or invalid corroboration falls back to lei-record-only evidence. Manager record failures count as `missing` with warnings and make no writes for that fund; successful fund writes use a savepoint. Management implies no ownership, parentage, licensing or solvency claims; umbrella and parent traversal are not implemented.
+
+CLI JSON keys are `source`, `kind`, `processed`, `linked`, `missing`, `skipped`, `warnings` (a list; its length is the warning count). The sources API `edge_fund_managers(conn, limit=25, progress=None)` returns the four counts, warning list and `edges` containing the stored edge dictionaries; an optional callback receives the four counts after each attempted fund. Human output prints a counts table and warning lines. Inspect stored provenance with `show ID` or `relationships ID`.
 
 ### Canadian coverage
 
@@ -275,4 +286,4 @@ For each new jurisdiction: verify the official licensing register, establish acc
 .venv/bin/python -m compileall -q finworld
 ```
 
-The offline suite covers 120 tests, including OSFI mapping, pagination, evidence links, estimated totals, malformed envelopes and atomic rollback, plus GLEIF category/website and SEC submissions/filings/facts coverage. Live acceptance on 2026-09-17: GLEIF FUND selection (7,233 GB funds, 25 stored), SEC AAPL with `--financials` (FY2026 balance-sheet facts), and the analyze command consuming them (net margin 0.278474 from live data). Live acceptance exercised FDIC fetch → list → show → analyze → export against a temporary database. An empty analysis correctly reported missing fundamentals rather than inventing ratios. GLEIF and World Bank also received small live connector smoke checks during implementation. These checks do not establish worldwide completeness or future API availability.
+The offline suite covers 132 tests, including GLEIF manager-edge provenance, optional corroboration fallback, local batching and CLI validation, plus OSFI mapping, pagination, evidence links, estimated totals, malformed envelopes and atomic rollback, plus GLEIF category/website and SEC submissions/filings/facts coverage. Live acceptance on 2026-09-17: GLEIF FUND selection (7,233 GB funds, 25 stored), SEC AAPL with `--financials` (FY2026 balance-sheet facts), and the analyze command consuming them (net margin 0.278474 from live data). Live acceptance exercised FDIC fetch → list → show → analyze → export against a temporary database. An empty analysis correctly reported missing fundamentals rather than inventing ratios. GLEIF and World Bank also received small live connector smoke checks during implementation. These checks do not establish worldwide completeness or future API availability.

@@ -160,6 +160,183 @@ class FetcherTests(unittest.TestCase):
         self.assertEqual(attributes["gleif.associated_lei"], LEI)
         self.assertEqual(attributes["gleif.associated_name"], "Manager GmbH")
 
+    def manager_funds(self, count=3):
+        return [upsert_entity(self.conn, "fund", f"Fund {index}", key=f"lei:{index:020}")
+                for index in range(1, count + 1)]
+
+    def manager_payload(self, lei=LEI):
+        row = copy.deepcopy(GLEIF_ROW)
+        row.update(id=lei, type="lei-records")
+        row["attributes"]["lei"] = lei
+        return {"data": row}
+
+    def manager_relationship(self, fund=1, manager=LEI):
+        return {"data": {"attributes": {
+            "relationship": {"startNode": {"id": f"{fund:020}"}, "endNode": {"id": manager},
+                             "type": "IS_FUND-MANAGED_BY", "status": "ACTIVE"},
+            "registration": {"status": "PUBLISHED", "lastUpdateDate": "2026-09-17T00:00:00Z"},
+        }}}
+
+    def test_manager_edges_provenance_fallback_missing_and_repeat(self):
+        funds = self.manager_funds()
+        second_lei = "5493001JY2KC4SJGF862"
+        self.client.get_json.side_effect = [self.manager_payload(), self.manager_relationship(),
+                                            self.manager_payload(second_lei), SourceError("HTTP 503"),
+                                            SourceError("HTTP 404")]
+        progress = Mock()
+        result = sources.edge_fund_managers(self.conn, 25, progress=progress)
+        self.assertEqual(set(result), {"processed", "linked", "missing", "skipped", "warnings", "edges"})
+        self.assertEqual([result[k] for k in ("processed", "linked", "missing", "skipped")], [3, 2, 1, 0])
+        self.assertEqual(len(result["warnings"]), 2)
+        self.assertEqual(len(result["edges"]), 2)
+        self.assertEqual(progress.call_count, 3)
+        rows = [dict(row) for row in self.conn.execute("SELECT * FROM edges ORDER BY src_id")]
+        self.assertEqual(rows, result["edges"])
+        for fund_id, manager_lei, row in zip(funds, (LEI, second_lei), rows):
+            self.assertEqual(row["source_url"], f"{SOURCES['GLEIF']}/{fund_id:020}/fund-manager")
+            self.assertIn(manager_lei, row["evidence"])
+            self.assertIn("subresource", row["evidence"])
+            self.assertEqual(row["observed_at"], "2025-02-01T00:00:00+00:00")
+            manager = entity_payload(self.conn, row["dst_id"])
+            self.assertEqual((manager["kind"], manager["country"]), ("legal_entity", "US"))
+            self.assertEqual(manager["attributes"]["gleif.category"], "GENERAL")
+            self.assertEqual(manager["attributes"]["source"], "gleif")
+            self.assertEqual(manager["attributes"]["source_url"], row["source_url"])
+        self.assertIn("relationship IS_FUND-MANAGED_BY ACTIVE as of 2026-09-17", rows[0]["evidence"])
+        self.assertNotIn("relationship", rows[1]["evidence"])
+        attrs = entity_payload(self.conn, funds[0])["attributes"]
+        self.assertEqual(json.loads(attrs["gleif.fund_manager_relationship"]), self.manager_relationship()["data"]["attributes"])
+        self.assertTrue(attrs["gleif.fund_manager_relationship.source_url"].endswith("/fund-manager-relationship"))
+        self.assertEqual([entity_payload(self.conn, eid)["kind"] for eid in funds], ["fund"] * 3)
+        self.assertEqual(self.client.get_json.call_count, 5)
+        for call in self.client.get_json.call_args_list:
+            http.validate_url(call.args[0])
+        self.client.get_json.reset_mock(side_effect=True)
+        self.client.get_json.side_effect = SourceError("HTTP 404")
+        repeat = sources.edge_fund_managers(self.conn, 25)
+        self.assertEqual([repeat[k] for k in ("processed", "linked", "missing", "skipped")], [1, 0, 1, 2])
+        self.client.get_json.assert_called_once_with(f"{SOURCES['GLEIF']}/00000000000000000003/fund-manager")
+
+    def test_manager_edges_limit_next_batch_and_local_selection(self):
+        funds = self.manager_funds()
+        upsert_entity(self.conn, "fund", "Manual fund", key="manual:fund")
+        upsert_entity(self.conn, "legal_entity", "Not a fund", key="lei:00000000000000000004")
+        for index in range(3):
+            self.client.get_json.side_effect = [self.manager_payload(), self.manager_relationship(fund=index + 1)]
+            result = sources.edge_fund_managers(self.conn, 1)
+            self.assertEqual([result[k] for k in ("processed", "linked", "skipped")], [1, 1, index])
+            self.assertEqual(result["edges"][0]["src_id"], funds[index])
+        self.client.get_json.reset_mock()
+        result = sources.edge_fund_managers(self.conn, 1000)
+        self.assertEqual((result["processed"], result["skipped"]), (0, 3))
+        self.client.get_json.assert_not_called()
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM entities WHERE key=?", (f"lei:{LEI}",)).fetchone()[0], 1)
+
+    def test_manager_edges_first_request_failure_no_writes(self):
+        self.manager_funds(1)
+        before = list(self.conn.iterdump())
+        self.client.get_json.side_effect = SourceError("HTTP 503 token=SECRET")
+        result = sources.edge_fund_managers(self.conn, 1)
+        self.assertEqual((result["processed"], result["missing"], result["linked"]), (1, 1, 0))
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertNotIn("SECRET", result["warnings"][0])
+        self.assertEqual(list(self.conn.iterdump()), before)
+        self.assertTrue(self.conn.in_transaction)
+        self.client.get_json.assert_called_once()
+
+    def test_manager_edges_malformed_records_and_local_lei_no_writes(self):
+        funds = self.manager_funds(1)
+        wrong_id = self.manager_payload("bad")
+        mismatch = self.manager_payload()
+        mismatch["data"]["attributes"]["lei"] = "5493001JY2KC4SJGF862"
+        wrong_type = self.manager_payload()
+        wrong_type["data"]["type"] = "relationships"
+        nameless = self.manager_payload()
+        nameless["data"]["attributes"]["entity"]["legalName"] = None
+        for payload in (None, [], {}, {"data": []}, {"data": None}, {"errors": [{"status": "404"}]},
+                        wrong_id, mismatch, wrong_type, nameless, self.manager_payload("00000000000000000001")):
+            with self.subTest(payload=payload):
+                self.client.get_json.return_value = payload
+                result = sources.edge_fund_managers(self.conn, 1)
+                self.assertEqual((result["missing"], result["linked"]), (1, 0))
+                self.assertEqual(len(result["warnings"]), 1)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM entities").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM attributes").fetchone()[0], 0)
+        self.conn.execute("UPDATE entities SET key='lei:../invalid' WHERE id=?", (funds[0],))
+        self.client.get_json.reset_mock()
+        self.assertEqual(sources.edge_fund_managers(self.conn, 1)["missing"], 1)
+        self.client.get_json.assert_not_called()
+
+    def test_manager_edges_invalid_corroboration_falls_back(self):
+        self.manager_funds(1)
+        variants = [None, {}, {"data": []}, self.manager_relationship(fund=2),
+                    self.manager_relationship(manager="5493001JY2KC4SJGF862")]
+        for field, value in (("type", "IS_DIRECTLY_CONSOLIDATED_BY"), ("status", "INACTIVE")):
+            payload = self.manager_relationship()
+            payload["data"]["attributes"]["relationship"][field] = value
+            variants.append(payload)
+        for payload in variants:
+            with self.subTest(payload=payload):
+                self.client.get_json.side_effect = [self.manager_payload(), payload]
+                result = sources.edge_fund_managers(self.conn, 1)
+                self.assertEqual((result["linked"], result["missing"]), (1, 0))
+                self.assertEqual(len(result["warnings"]), 1)
+                self.assertNotIn("relationship", result["edges"][0]["evidence"])
+                self.assertEqual(entity_payload(self.conn, 1)["attributes"], {})
+                self.conn.execute("DELETE FROM edges")
+
+    def test_manager_edges_identifier_fallback_and_fund_manager_category(self):
+        self.manager_funds(1)
+        for missing in ("id", "lei"):
+            payload = self.manager_payload()
+            if missing == "id":
+                del payload["data"]["id"]
+            else:
+                del payload["data"]["attributes"]["lei"]
+            payload["data"]["attributes"]["entity"]["category"] = "FUND"
+            self.client.get_json.side_effect = [payload, SourceError("HTTP 404")]
+            result = sources.edge_fund_managers(self.conn, 1)
+            self.assertEqual(result["linked"], 1)
+            self.assertEqual(entity_payload(self.conn, result["edges"][0]["dst_id"])["kind"], "fund")
+            self.conn.execute("DELETE FROM edges")
+
+    def test_manager_edges_preserve_existing_kind_and_primary_timestamp(self):
+        self.manager_funds(1)
+        manager_id = upsert_entity(self.conn, "company", "Existing manager", key=f"lei:{LEI}")
+
+        def response(url):
+            if url.endswith("/fund-manager"):
+                self.client.retrieved_at = "2026-09-16T00:00:00Z"
+                return self.manager_payload()
+            self.client.retrieved_at = "2026-09-17T00:00:00Z"
+            return self.manager_relationship()
+
+        self.client.get_json.side_effect = response
+        self.client.warnings = ["HTTP cache write failed"]
+        result = sources.edge_fund_managers(self.conn, 1)
+        manager = entity_payload(self.conn, manager_id)
+        self.assertEqual((manager["kind"], manager["name"]), ("company", "Example Trust"))
+        self.assertEqual(result["edges"][0]["observed_at"], "2026-09-16T00:00:00Z")
+        self.assertEqual(manager["attributes"]["retrieved_at"], "2026-09-16T00:00:00Z")
+        self.assertEqual(entity_payload(self.conn, 1)["attributes"]["gleif.fund_manager_relationship.retrieved_at"], "2026-09-17T00:00:00Z")
+        self.assertEqual(result["warnings"], self.client.warnings)
+
+    def test_manager_edges_invalid_limits_no_http(self):
+        for limit in (0, 1001, -1, True, "25", 1.5):
+            with self.subTest(limit=limit), self.assertRaises(SourceError):
+                sources.edge_fund_managers(self.conn, limit)
+        self.factory.assert_not_called()
+
+    def test_manager_edges_write_failure_rolls_back_fund_only(self):
+        self.manager_funds(1)
+        before = list(self.conn.iterdump())
+        self.client.get_json.side_effect = [self.manager_payload(), self.manager_relationship()]
+        with patch.object(sources, "add_edge", side_effect=sqlite3.OperationalError("locked")):
+            with self.assertRaisesRegex(SourceError, "rolled back"):
+                sources.edge_fund_managers(self.conn, 1)
+        self.assertEqual(list(self.conn.iterdump()), before)
+        self.assertTrue(self.conn.in_transaction)
+
     def test_sec_submissions_filings_limit_provenance_and_ticker(self):
         self.client.get_json.return_value = sec_submissions()
         result = fetch_source(self.conn, "sec", query="0000320193", limit=2)
