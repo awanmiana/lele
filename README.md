@@ -26,14 +26,15 @@ The menu exposes every operation, command-specific `--help`, back and quit. It p
 | Source | Live ingestion | Important boundary |
 | --- | --- | --- |
 | FDIC BankFind | Active insured US banks and savings institutions, certificate IDs, regulator codes and reported websites | Not every US financial institution; regulator codes are attributes, not a populated global authority graph |
-| GLEIF | Legal entities, LEIs, legal-address country, registration status | An LEI record does **not** establish that an entity is a bank, licensed or solvent |
+| GLEIF | Legal entities, LEIs, legal-address country, registration status; `--category FUND` selects fund entities (worldwide, country-filterable) | An LEI record does **not** establish that an entity is a bank, licensed or solvent; FUND does not distinguish VC from other funds |
+| SEC EDGAR | Single-issuer registrant profile, recent filings with archive URLs, optional latest us-gaap USD facts (assets, liabilities, equity, income, revenue, cash) | US filers only, one issuer per fetch; only recent submissions are stored and ticker resolution requires a previously stored ticker; documents are never downloaded |
 | World Bank | Indicator observations by economy and period | Macroeconomic context, including aggregates; not company fundamentals |
 | OSFI Canada | Monthly federal institution list, bank branches, insurers, trust/loan companies and representative offices; evidenced OSFI regulator links | Federal scope only, not all Canadian institutions; representative offices receive no inferred supervision edge |
 | Local JSON | Institutions, authorities, auditors, owners, relationships, accounting metrics and filing references | User supplies evidence and data; ingestion does not independently verify claims |
 
 Use `finworld --json sources` to see actual endpoints and coverage. Requests are bounded to 1–1000 input records and at most ten pages. Results report pages, counts, warnings and truncation. Results are bounded and not a snapshot guarantee; small feeds can be exhausted when `truncated` is false and counts match the reported total. This does not establish complete jurisdiction coverage. `stored` counts processed institution upserts, excluding auxiliary regulator entities. Cross-source duplicates are deliberately not auto-merged. OSFI has no stable institution ID: its keys hash normalized name/type/group/industry, not CKAN row IDs; renamed or reclassified records require reconciliation.
 
-No bundled speculative bank list, automatic global regulator discovery, SEC financial ingestion, news crawling, market prices, sanctions matching, trading or brokerage integration is implemented. Source availability and terms can change.
+No bundled speculative bank list, automatic global regulator discovery, news crawling, market prices, sanctions matching, trading or brokerage integration is implemented. Source availability and terms can change.
 
 ## Commands
 
@@ -43,6 +44,8 @@ Global options **precede** the command: `finworld --db PATH --json COMMAND ...`.
 finworld init
 finworld sources
 finworld fetch fdic --limit 25
+finworld fetch gleif --category FUND --country GB --limit 1000
+finworld fetch sec --query 0000320193 --financials --limit 100
 finworld fetch osfi --country CA --limit 1000
 finworld list --country CA --kind bank_branch --limit 1000
 finworld fetch gleif --country GB --query bank --limit 25
@@ -205,7 +208,7 @@ For each new jurisdiction: verify the official licensing register, establish acc
 
 - [ ] 041 Model regulators, central banks, deposit insurers and supervisory mandates separately.
 - [ ] 042 Normalize ISO jurisdictions without confusing headquarters and licenses.
-- [ ] 043 Ingest GLEIF direct/ultimate parent disclosures and reporting exceptions.
+- [ ] 043 Ingest GLEIF direct/ultimate parent disclosures and reporting exceptions (GLEIF `--category FUND` selection delivered; parent facts pending).
 - [ ] 044 Resolve FDIC regulator codes to documented authority identities.
 - [ ] 045 Extend US coverage to credit unions and other relevant registers.
 - [ ] 046 Add UK authorized-firm and prudential registers after access review.
@@ -226,7 +229,7 @@ For each new jurisdiction: verify the official licensing register, establish acc
 
 ### Phase 4 — financial and relationship intelligence
 
-- [ ] 061 Add properly identified SEC submissions/company facts access with required contact policy.
+- [x] 061 Add properly identified SEC submissions/company facts access with required contact policy (registrants, recent filings, latest us-gaap USD facts; historical files and ticker directory remain open items).
 - [ ] 062 Add FDIC financial observations with units, dates and institution scope.
 - [ ] 063 Normalize IFRS/GAAP taxonomy mappings without silently conflating concepts.
 - [ ] 064 Distinguish duration/instant facts, restatements and consolidated accounts.
@@ -267,4 +270,4 @@ For each new jurisdiction: verify the official licensing register, establish acc
 .venv/bin/python -m compileall -q finworld
 ```
 
-The offline suite covers 110 tests, including OSFI mapping, pagination, evidence links, estimated totals, malformed envelopes and atomic rollback. Live acceptance exercised FDIC fetch → list → show → analyze → export against a temporary database. An empty analysis correctly reported missing fundamentals rather than inventing ratios. GLEIF and World Bank also received small live connector smoke checks during implementation. These checks do not establish worldwide completeness or future API availability.
+The offline suite covers 120 tests, including OSFI mapping, pagination, evidence links, estimated totals, malformed envelopes and atomic rollback, plus GLEIF category/website and SEC submissions/filings/facts coverage. Live acceptance on 2026-09-17: GLEIF FUND selection (7,233 GB funds, 25 stored), SEC AAPL with `--financials` (FY2026 balance-sheet facts), and the analyze command consuming them (net margin 0.278474 from live data). Live acceptance exercised FDIC fetch → list → show → analyze → export against a temporary database. An empty analysis correctly reported missing fundamentals rather than inventing ratios. GLEIF and World Bank also received small live connector smoke checks during implementation. These checks do not establish worldwide completeness or future API availability.

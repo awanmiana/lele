@@ -117,6 +117,9 @@ class FetcherTests(unittest.TestCase):
         self.assertEqual(data["attributes"]["iso_jurisdiction"], "US-IL")
         self.assertEqual(data["attributes"]["source_id"], LEI)
         self.assertEqual(data["attributes"]["source"], "gleif")
+        self.assertNotIn("gleif.sub_category", data["attributes"])
+        self.assertNotIn("gleif.associated_lei", data["attributes"])
+        self.assertNotIn("gleif.associated_name", data["attributes"])
         self.assertTrue(data["attributes"]["retrieved_at"])
         self.assertEqual(data["metrics"], [])
         self.assertEqual(self.params()["filter[entity.legalName]"], ["Example & Trust"])
@@ -149,6 +152,13 @@ class FetcherTests(unittest.TestCase):
         row["attributes"]["entity"]["website"] = " HTTP://example.test "
         self.fetch("gleif", [row])
         self.assertEqual(self.payload()["website"], "example.test")
+        row["attributes"]["entity"]["subCategory"] = "Private Equity"
+        row["attributes"]["entity"]["associatedEntity"] = {"lei": LEI, "name": " Manager GmbH "}
+        self.fetch("gleif", [row])
+        attributes = self.payload()["attributes"]
+        self.assertEqual(attributes["gleif.sub_category"], "Private Equity")
+        self.assertEqual(attributes["gleif.associated_lei"], LEI)
+        self.assertEqual(attributes["gleif.associated_name"], "Manager GmbH")
 
     def test_sec_submissions_filings_limit_provenance_and_ticker(self):
         self.client.get_json.return_value = sec_submissions()

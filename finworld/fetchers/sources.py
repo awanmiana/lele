@@ -175,6 +175,9 @@ def _gleif(row, indicator):
                   "gleif.registration_status": registration.get("status"),
                   "gleif.category": entity.get("category"),
                   "gleif.website": _text(entity.get("website")) or None,
+                  "gleif.sub_category": _text(entity.get("subCategory")) or None,
+                  "gleif.associated_lei": _text(_object(entity.get("associatedEntity")).get("lei")) or None,
+                  "gleif.associated_name": _text(_object(entity.get("associatedEntity")).get("name")) or None,
                   "source_updated_at": registration.get("lastUpdateDate")},
     }
 
