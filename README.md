@@ -2,6 +2,11 @@
 
 A local-first financial-institution research CLI. **Working MVP, not a complete global database or investment recommendation system.** Python 3.11+, SQLite 3.35+, no runtime third-party dependencies.
 
+Project documents:
+- `README.md` (this file): usage, capabilities, boundaries.
+- `DEVELOPMENT_PLAN.md`: architecture, delivered state, and the ordered build queue with acceptance gates.
+- `WORKLOG.md`: session-by-session record with environment quirks and the exact next step — read it first when resuming after a break.
+
 ## Run
 
 From this directory, without installing:
