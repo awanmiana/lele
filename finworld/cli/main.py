@@ -97,11 +97,13 @@ def build_parser():
         parsers[command].add_argument("id", type=_eid, metavar="ID")
     fetch = parsers["fetch"]
     fetch.add_argument("source", choices=tuple(item["id"] for item in sources.list_sources()))
-    fetch.add_argument("--query", default="", help="Name or identifier; OSFI: fulltext search, not bank-only; not supported by World Bank")
-    fetch.add_argument("--country", default="", help="GLEIF: ISO2; FDIC: US; OSFI: blank/CA/CAN (regulatory jurisdiction, not headquarters); World Bank: economy code or ALL")
+    fetch.add_argument("--query", default="", help="Name or identifier; SEC: 10-digit CIK or previously stored SEC ticker (1..10 letters); OSFI: fulltext search, not bank-only; not supported by World Bank")
+    fetch.add_argument("--country", default="", help="GLEIF: ISO2; FDIC: US; SEC: must be empty; OSFI: blank/CA/CAN (regulatory jurisdiction, not headquarters); World Bank: economy code or ALL")
     fetch.epilog = "OSFI: monthly public federal list, not all Canadian institutions or historical coverage; stored excludes the regulator. Representative offices carry no automatic supervision claim. Renames are not resolved; absent records are not deleted."
-    fetch.add_argument("--limit", type=_limit, default=50, help="Input record budget, 1..1000 (default: 50)")
+    fetch.add_argument("--limit", type=_limit, default=50, help="Input record budget; SEC: maximum recent filings stored per fetch, 1..1000 (default: 50)")
     fetch.add_argument("--indicator", help="World Bank only (default: NY.GDP.MKTP.CD)")
+    fetch.add_argument("--category", choices=("FUND", "SOLE_PROPRIETOR"), default="", help="GLEIF only: entity category; FUND does not identify VC")
+    fetch.add_argument("--financials", action="store_true", help="SEC only: latest us-gaap USD facts by max(end, filed), no form/frame preference; 20 MiB cap instead of default 2 MiB; failure aborts ingestion")
     parsers["import"].add_argument("path", type=_path, metavar="PATH", help="Importer JSON with entities, provenance and relationships")
     sentiment = parsers["sentiment"]
     text = sentiment.add_mutually_exclusive_group(required=True)
@@ -127,6 +129,15 @@ def _validate_fetch(args):
         raise CLIError("fetch limit exceeds the source record budget", 2)
     if args.indicator is not None and args.source != "worldbank":
         raise CLIError("--indicator is supported only for worldbank", 2)
+    if args.category and args.source != "gleif":
+        raise CLIError("--category is supported only for gleif", 2)
+    if args.financials and args.source != "sec":
+        raise CLIError("--financials is supported only for sec", 2)
+    if args.source == "sec":
+        if country:
+            raise CLIError("SEC --country must be empty", 2)
+        if not re.fullmatch(r"(?:[A-Z]{1,10}|[0-9]{10})", query.upper()):
+            raise CLIError("SEC --query must be a ticker (1..10 letters) or a 10-digit CIK", 2)
     if args.source == "gleif" and country and not re.fullmatch(r"[A-Z]{2}", country):
         raise CLIError("GLEIF country must be a two-letter code", 2)
     if args.source == "fdic" and country not in ("", "US", "USA"):
@@ -250,7 +261,9 @@ def _dispatch(args):
         if command == "countries":
             return registry.list_countries(conn)
         if command == "fetch":
-            return sources.fetch_source(conn, args.source, query=args.query, country=args.country, limit=args.limit, indicator=args.indicator if args.indicator is not None else "NY.GDP.MKTP.CD")
+            return sources.fetch_source(conn, args.source, query=args.query, country=args.country,
+                                        limit=args.limit, indicator=args.indicator if args.indicator is not None else "NY.GDP.MKTP.CD",
+                                        category=args.category, financials=args.financials)
         if command == "import":
             return importer.import_json(conn, args.path)
         if command == "analyze":

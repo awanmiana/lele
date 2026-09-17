@@ -53,6 +53,23 @@ def page(source, rows, total=None):
     return [{"page": 1, "pages": 1, "total": total, "lastupdated": "2025-01-01"}, rows]
 
 
+def sec_submissions():
+    return {
+        "cik": 320193, "name": "Example Issuer", "entityType": "operating",
+        "tickers": ["AAPL"], "website": " https://www.example.test ",
+        "filings": {"recent": {
+            "form": ["10-K", "8-K", "10-Q"],
+            "filingDate": ["2024-11-01", "2025-02-02", "2025-01-01"],
+            "accessionNumber": ["0000320193-24-000001", "0000320193-25-000003", "0000320193-25-000002"],
+            "primaryDocument": ["annual.htm", "xslF345X06/form4.xml", "quarter.htm"],
+        }, "files": []},
+    }
+
+
+def sec_fact(value, end="2024-12-31", filed="2025-02-01", **kwargs):
+    return {"val": value, "end": end, "filed": filed, **kwargs}
+
+
 def fdic_row(cert):
     row = copy.deepcopy(FDIC_ROW)
     row["data"]["CERT"] = cert
@@ -84,7 +101,7 @@ class FetcherTests(unittest.TestCase):
 
     def test_catalog(self):
         catalog = list_sources()
-        self.assertEqual({s["id"] for s in catalog}, {"gleif", "fdic", "worldbank", "osfi"})
+        self.assertEqual({s["id"] for s in catalog}, {"gleif", "fdic", "worldbank", "osfi", "sec"})
         for item in catalog:
             self.assertEqual(set(item), {"id", "name", "coverage", "status", "url"})
             self.assertEqual(item["status"], "available")
@@ -110,6 +127,170 @@ class FetcherTests(unittest.TestCase):
         self.assertEqual(self.params()["filter[lei]"], [LEI])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM entities").fetchone()[0], 1)
         self.assertEqual(self.payload()["name"], "Renamed Trust")
+
+    def test_gleif_category_website_set_clear_and_reclassification(self):
+        row = copy.deepcopy(GLEIF_ROW)
+        self.fetch("gleif", [row])
+        for category, kind in (("FUND", "fund"), ("SOLE_PROPRIETOR", "legal_entity")):
+            row["attributes"]["entity"].update(category=category, website=" https://example.test/path ")
+            self.fetch("gleif", [row], category=category)
+            self.assertEqual(self.params()["filter[entity.category]"], [category])
+            self.assertEqual(self.payload()["kind"], kind)
+            self.assertEqual(self.payload()["website"], "example.test/path")
+            self.assertEqual(self.payload()["attributes"]["gleif.website"], "https://example.test/path")
+        for value in (None, 12, {}, "example.test", "ftp://example.test", "https://", "https://bad host", "http://[broken"):
+            with self.subTest(value=value):
+                row["attributes"]["entity"]["website"] = value
+                self.fetch("gleif", [row])
+                self.assertIsNone(self.payload()["website"])
+        del row["attributes"]["entity"]["website"]
+        self.fetch("gleif", [row])
+        self.assertNotIn("gleif.website", self.payload()["attributes"])
+        row["attributes"]["entity"]["website"] = " HTTP://example.test "
+        self.fetch("gleif", [row])
+        self.assertEqual(self.payload()["website"], "example.test")
+
+    def test_sec_submissions_filings_limit_provenance_and_ticker(self):
+        self.client.get_json.return_value = sec_submissions()
+        result = fetch_source(self.conn, "sec", query="0000320193", limit=2)
+        self.assertEqual(set(result), {"source", "fetched", "stored", "warnings", "truncated", "total", "pages", "coverage"})
+        self.assertEqual((result["fetched"], result["stored"], result["pages"], result["total"]), (1, 1, 1, 1))
+        self.assertTrue(result["truncated"])
+        data = self.payload()
+        self.assertEqual((data["key"], data["name"], data["kind"]), ("cik:0000320193", "Example Issuer", "company"))
+        self.assertEqual(data["website"], "https://www.example.test")
+        self.assertIsNone(data["country"])
+        self.assertEqual(data["attributes"]["sec.tickers"], "AAPL")
+        self.assertEqual(data["attributes"]["sec.website"], "https://www.example.test")
+        self.assertEqual(data["attributes"]["source_url"], SOURCES["SEC_SUBMISSIONS"] + "/CIK0000320193.json")
+        self.assertEqual(data["filings"], [
+            {"form": "8-K", "date": "2025-02-02", "title": "xslF345X06/form4.xml", "url": "https://www.sec.gov/Archives/edgar/data/320193/000032019325000003/xslF345X06/form4.xml", "source": "sec"},
+            {"form": "10-Q", "date": "2025-01-01", "title": "quarter.htm", "url": "https://www.sec.gov/Archives/edgar/data/320193/000032019325000002/quarter.htm", "source": "sec"},
+        ])
+        self.assertEqual(data["metrics"], [])
+        self.factory.assert_called_once_with()
+        fetch_source(self.conn, "sec", query="aapl", limit=1)
+        self.assertEqual(len(self.payload()["filings"]), 2)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM entities").fetchone()[0], 1)
+
+    def test_sec_nonoperating_types_and_website_clear(self):
+        payload = sec_submissions()
+        for entity_type in ("operating", "asset-backed", "etf", "investment_trust", "fund", "issuer", "unknown"):
+            payload["entityType"] = entity_type
+            payload["website"] = "https://example.test" if entity_type == "operating" else None
+            payload["tickers"] = []
+            self.client.get_json.return_value = payload
+            fetch_source(self.conn, "sec", query="0000320193")
+            self.assertEqual(self.payload()["kind"], "company" if entity_type == "operating" else "issuer")
+            self.assertEqual(self.payload()["attributes"]["sec.entity_type"], entity_type)
+            self.assertEqual(self.payload()["attributes"]["sec.tickers"], "")
+            if entity_type != "operating":
+                self.assertIsNone(self.payload()["website"])
+                self.assertNotIn("sec.website", self.payload()["attributes"])
+        payload["website"] = "www.example.test"
+        fetch_source(self.conn, "sec", query="0000320193")
+        self.assertIsNone(self.payload()["website"])
+        self.assertEqual(self.payload()["attributes"]["sec.website"], "www.example.test")
+
+    def test_sec_financials_latest_usd_missing_and_exact_ties(self):
+        gaap = {
+            "Assets": {"units": {"USD": [sec_fact(100, form="10-K"), sec_fact(200, filed="2025-02-02", form="10-Q", frame="CY2024Q4I"), sec_fact(999, end="2023-12-31", filed="2026-01-01")], "EUR": [sec_fact(9000, end="2026-01-01")]}},
+            "Liabilities": {"units": {"EUR": [sec_fact(99)]}},
+            "StockholdersEquity": {"units": {"USD": [sec_fact(40)]}},
+            "NetIncomeLoss": {"units": {"USD": [sec_fact(-5), sec_fact(-4)]}},
+            "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [sec_fact(80)]}},
+            "CashAndCashEquivalentsAtCarryingValue": {"units": {"USD": [sec_fact(0), sec_fact(True, end="2026-01-01"), sec_fact(float("nan"))]}},
+        }
+        facts = {"cik": 320193, "facts": {"us-gaap": gaap}}
+        self.client.get_json.side_effect = [sec_submissions(), facts]
+        result = fetch_source(self.conn, "sec", query="0000320193", financials=True)
+        self.assertEqual(result["pages"], 2)
+        self.assertEqual(self.factory.call_args.kwargs, {"max_bytes": 20 * 1024 * 1024})
+        data = self.payload()
+        values = {m["k"]: m["v"] for m in data["metrics"]}
+        self.assertEqual(values, {"total_assets": "200", "total_equity": "40", "net_income": "-5", "revenue": "80", "cash": "0"})
+        self.assertTrue(all(m["source"] == "sec" and m["period"] == "2024-12-31" for m in data["metrics"]))
+        self.assertEqual(data["attributes"]["sec.facts_missing"], "Liabilities")
+        self.assertEqual(data["attributes"]["sec.facts_retrieved"], "1")
+        self.assertEqual(data["attributes"]["sec.facts_url"], SOURCES["SEC_FACTS"] + "/CIK0000320193.json")
+        gaap["NetIncomeLoss"]["units"]["USD"].reverse()
+        gaap["Revenues"] = {"units": {"USD": [sec_fact(90)]}}
+        self.client.get_json.side_effect = [sec_submissions(), facts]
+        fetch_source(self.conn, "sec", query="0000320193", financials=True)
+        values = {m["k"]: m["v"] for m in self.payload()["metrics"]}
+        self.assertEqual((values["net_income"], values["revenue"]), ("-5", "90"))
+        self.assertEqual(len(values), 5)
+
+    def test_sec_revenue_prefers_current_tag_and_longest_duration(self):
+        gaap = {
+            "Assets": {"units": {"USD": [sec_fact(383266000000, end="2026-06-27", filed="2026-07-31")]}},
+            "NetIncomeLoss": {"units": {"USD": [
+                sec_fact(101464000000, start="2025-09-28", end="2026-06-27", filed="2026-07-31"),
+                sec_fact(29789000000, start="2026-03-29", end="2026-06-27", filed="2026-07-31"),
+            ]}},
+            "Revenues": {"units": {"USD": [sec_fact(62900000000, start="2018-07-01", end="2018-09-29", filed="2018-11-05")]}},
+            "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [
+                sec_fact(364357000000, start="2025-09-28", end="2026-06-27", filed="2026-07-31"),
+                sec_fact(109417000000, start="2026-03-29", end="2026-06-27", filed="2026-07-31"),
+            ]}},
+        }
+        facts = {"cik": 320193, "facts": {"us-gaap": gaap}}
+        self.client.get_json.side_effect = [sec_submissions(), facts]
+        fetch_source(self.conn, "sec", query="0000320193", financials=True)
+        metrics = {m["k"]: (m["v"], m["period"]) for m in self.payload()["metrics"]}
+        self.assertEqual(metrics["revenue"], ("364357000000", "2026-06-27"))
+        self.assertEqual(metrics["net_income"], ("101464000000", "2026-06-27"))
+        self.assertNotIn("total_liabilities", metrics)
+        self.assertEqual(set(metrics), {"total_assets", "net_income", "revenue"})
+
+    def test_sec_invalid_arguments_and_unresolved_tickers_no_http(self):
+        cases = [dict(query=q) for q in ("", "BRK.B", "A1", "ABCDEFGHIJK", "320193", "../AAPL")]
+        cases += [dict(query="AAPL", country="US"), dict(query="AAPL"), dict(query="0000320193", financials=1)]
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs), self.assertRaises(SourceError):
+                fetch_source(self.conn, "sec", **kwargs)
+        for kwargs in (dict(source="fdic", category="FUND"), dict(source="gleif", category="VC"),
+                       dict(source="gleif", financials=True), dict(source="gleif", category=None)):
+            with self.subTest(kwargs=kwargs), self.assertRaises(SourceError):
+                fetch_source(self.conn, **kwargs)
+        self.factory.assert_not_called()
+
+    def test_sec_malformed_submissions_and_facts_are_atomic(self):
+        upsert_entity(self.conn, "bank", "Caller", key="manual:1")
+        malformed = [None, {}, dict(sec_submissions(), cik=1), dict(sec_submissions(), tickers="AAPL"),
+                     dict(sec_submissions(), name=""), dict(sec_submissions(), filings={"recent": {}})]
+        mismatch = sec_submissions()
+        mismatch["filings"]["recent"]["form"].pop()
+        malformed.append(mismatch)
+        bad_row = sec_submissions()
+        bad_row["filings"]["recent"]["filingDate"][2] = "2025-02-30"
+        malformed.append(bad_row)
+        for payload in malformed:
+            self.client.get_json.return_value = payload
+            with self.subTest(payload=payload), self.assertRaisesRegex(SourceError, "no ingestion writes applied"):
+                fetch_source(self.conn, "sec", query="0000320193", limit=1)
+        for error in (SourceError("response exceeds byte limit"), {"cik": 1, "facts": {}}, {}):
+            self.client.get_json.side_effect = [sec_submissions(), error]
+            with self.subTest(error=error), self.assertRaisesRegex(SourceError, "no ingestion writes applied"):
+                fetch_source(self.conn, "sec", query="0000320193", financials=True)
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM entities").fetchone()[0], 1)
+        for table in ("attributes", "filings", "metrics"):
+            self.assertEqual(self.conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
+
+    def test_sec_write_failure_rolls_back_and_historical_warning(self):
+        upsert_entity(self.conn, "bank", "Caller", key="manual:1")
+        payload = sec_submissions()
+        payload["filings"]["files"] = [{"name": "older.json"}]
+        self.client.get_json.return_value = payload
+        with patch.object(sources, "add_filing", side_effect=sqlite3.OperationalError("locked")):
+            with self.assertRaisesRegex(SourceError, "rolled back"):
+                fetch_source(self.conn, "sec", query="0000320193")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM entities").fetchone()[0], 1)
+        result = fetch_source(self.conn, "sec", query="0000320193", limit=1000)
+        self.assertTrue(result["truncated"])
+        self.assertTrue(any("historical" in w for w in result["warnings"]))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM filings").fetchone()[0], 3)
 
     def test_fdic_mapping_filter_and_no_website_guess(self):
         self.fetch("fdic", [FDIC_ROW], query="00014", country="USA")
@@ -315,6 +496,33 @@ class HTTPTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(SourceError):
                 self.client.get_json(url)
         self.client.opener.open.assert_not_called()
+
+    def test_sec_allowlist_headers_pacing_and_source_byte_override(self):
+        for base in (SOURCES["SEC_SUBMISSIONS"], SOURCES["SEC_FACTS"]):
+            self.assertEqual(http.validate_url(base + "/CIK0000320193.json"), "data.sec.gov")
+            with self.assertRaises(SourceError):
+                http.validate_url(base + "-other/CIK0000320193.json")
+        with self.assertRaises(SourceError):
+            http.validate_url("https://www.sec.gov/company_tickers.json")
+        self.url = SOURCES["SEC_SUBMISSIONS"] + "/CIK0000320193.json"
+        http._last_request["data.sec.gov"] = 10
+        self.respond()
+        with patch.object(http.time, "monotonic", return_value=10.5), patch.object(http.time, "sleep") as sleep:
+            self.client.get_json(self.url)
+        sleep.assert_called_once_with(1.0)
+        request = self.client.opener.open.call_args.args[0]
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(request.get_header("User-agent"), "finworld/0.1 (public financial data research CLI)")
+        self.assertEqual(self.client.max_bytes, 2 * 1024 * 1024)
+        larger = http.HTTPClient(cache_dir=None, max_bytes=20 * 1024 * 1024)
+        larger.opener = Mock()
+        raw = json.dumps({"padding": "x" * (3 * 1024 * 1024)}).encode()
+        larger.opener.open.return_value = Response(raw)
+        with patch.object(http.time, "sleep"):
+            self.assertEqual(len(larger.get_json(SOURCES["SEC_FACTS"] + "/CIK0000320193.json")["padding"]), 3 * 1024 * 1024)
+        larger.opener.open.return_value = Response(headers={"Content-Length": str(20 * 1024 * 1024 + 1)})
+        with patch.object(http.time, "sleep"), self.assertRaisesRegex(SourceError, "byte limit"):
+            larger.get_json(SOURCES["SEC_FACTS"] + "/CIK0000320193.json")
 
     def test_response_closes_and_cache_hit_does_not_request(self):
         response = self.respond()

@@ -13,6 +13,8 @@ FETCH_PAGE_SIZE = 100
 FETCH_MAX_PAGES = 10
 FETCH_MAX_LIMIT = 1000
 SOURCES = {
+    "SEC_SUBMISSIONS": "https://data.sec.gov/submissions",
+    "SEC_FACTS": "https://data.sec.gov/api/xbrl/companyfacts",
     "GLEIF": "https://api.gleif.org/api/v1/lei-records",
     "FDIC": "https://api.fdic.gov/banks/institutions",
     "WB_INDICATORS": "https://api.worldbank.org/v2",

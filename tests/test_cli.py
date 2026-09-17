@@ -90,7 +90,7 @@ class CLITests(unittest.TestCase):
 
     def test_sources_catalog_without_database(self):
         catalog = self.success("sources")
-        self.assertEqual([item["id"] for item in catalog], ["gleif", "fdic", "worldbank", "osfi"])
+        self.assertEqual([item["id"] for item in catalog], ["gleif", "fdic", "worldbank", "osfi", "sec"])
         self.assertFalse(self.db.exists())
         self.assertEqual(set(COMMANDS), {"init", "sources", "list", "show", "stats", "countries", "fetch", "import", "analyze", "sentiment", "relationships", "export", "menu"})
         self.assertEqual(set(MENU_LABELS), (set(COMMANDS) - {"menu"}) | {"help", "back", "quit"})
@@ -139,7 +139,7 @@ class CLITests(unittest.TestCase):
                 result = self.success("fetch", source, "--country", "US", "--limit", "10", *extra)
                 self.assertEqual(result["stored"], 1)
                 self.assertEqual(fetch.call_args.args[1], source)
-                self.assertEqual(fetch.call_args.kwargs, {"query": "" if source == "worldbank" else "Example", "country": "US", "limit": 10, "indicator": "NY.GDP.MKTP.CD"})
+                self.assertEqual(fetch.call_args.kwargs, {"query": "" if source == "worldbank" else "Example", "country": "US", "limit": 10, "indicator": "NY.GDP.MKTP.CD", "category": "", "financials": False})
         for args in (["gleif", "--country", "USA"], ["fdic", "--country", "GB"],
                      ["worldbank", "--query", "bank"], ["worldbank", "--country", "US;GB"],
                      ["worldbank", "--indicator", "../x"], ["worldbank", "--indicator", ""],
@@ -149,6 +149,32 @@ class CLITests(unittest.TestCase):
                 self.assertEqual((status, out), (2, ""))
                 self.assertTrue(err)
                 fetch.assert_not_called()
+
+    def test_fetch_category_financials_choices_and_help(self):
+        for source, flags, category, financials in (
+            ("gleif", ["--category", "FUND"], "FUND", False),
+            ("gleif", ["--category", "SOLE_PROPRIETOR"], "SOLE_PROPRIETOR", False),
+            ("sec", ["--query", "aapl", "--financials"], "", True),
+            ("sec", ["--query", "0000320193"], "", False),
+        ):
+            with self.subTest(source=source, flags=flags), patch("finworld.fetchers.sources.fetch_source", return_value={}) as fetch:
+                self.success("fetch", source, *flags)
+                self.assertEqual(fetch.call_args.kwargs["category"], category)
+                self.assertEqual(fetch.call_args.kwargs["financials"], financials)
+        for flags in (["gleif", "--category", "VC"], ["fdic", "--category", "FUND"],
+                      ["sec", "--query", "AAPL", "--category", "FUND"],
+                      ["gleif", "--financials"], ["osfi", "--financials"],
+                      ["sec"], ["sec", "--query", "BRK.B"],
+                      ["sec", "--query", "AAPL", "--country", "US"]):
+            with self.subTest(flags=flags), patch("finworld.fetchers.sources.fetch_source") as fetch:
+                status, out, err = self.invoke("fetch", *flags)
+                self.assertEqual((status, out), (2, ""))
+                self.assertTrue(err)
+                fetch.assert_not_called()
+        status, out, err = self.invoke("fetch", "--help")
+        self.assertEqual((status, err), (0, ""))
+        for text in ("sec", "--category", "SOLE_PROPRIETOR", "--financials", "20 MiB", "2 MiB", "previously stored", "maximum recent filings"):
+            self.assertIn(text, " ".join(out.split()))
 
     def test_errors_do_not_leak_exception_secrets(self):
         for target, error, args in (

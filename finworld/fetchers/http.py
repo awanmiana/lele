@@ -193,7 +193,8 @@ class HTTPClient:
 
     def _request(self, url, host):
         with _lock:
-            delay = self.rate - (time.monotonic() - _last_request.get(host, -math.inf))
+            rate = max(self.rate, HOST_RATE_LIMIT_SECONDS) if host == "data.sec.gov" else self.rate
+            delay = rate - (time.monotonic() - _last_request.get(host, -math.inf))
             if delay > 0:
                 time.sleep(delay)
             _last_request[host] = time.monotonic()

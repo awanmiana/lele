@@ -3,15 +3,16 @@ import json
 import math
 import re
 import sqlite3
+from datetime import date
 from typing import TypedDict
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from uuid import uuid4
 
 from ..core.constants import (
     FETCH_MAX_LIMIT, FETCH_MAX_PAGES, FETCH_PAGE_SIZE, OSFI_DATASET_URL,
     OSFI_RESOURCE_ID, SOURCES,
 )
-from ..core.registry import add_edge, add_metric, normalize_name, set_attr, upsert_entity
+from ..core.registry import add_edge, add_filing, add_metric, normalize_name, set_attr, upsert_entity
 from .http import HTTPClient, SourceError
 
 
@@ -27,10 +28,11 @@ class FetchResult(TypedDict):
 
 
 _CATALOG = (
-    ("gleif", "GLEIF legal entities", "Global LEI registrants; not a bank classification.", "GLEIF"),
+    ("gleif", "GLEIF legal entities", "Global LEI registrants; FUND category option selects funds, not specifically VC; not a bank classification.", "GLEIF"),
     ("fdic", "FDIC BankFind institutions", "Active FDIC-insured US banks and savings institutions.", "FDIC"),
     ("worldbank", "World Bank indicators", "Country/economy macro observations, including aggregates; not entity fundamentals.", "WB_INDICATORS"),
     ("osfi", "OSFI Canada institutions", "Monthly public Canadian federal institution list and foreign bank representative offices; not all Canadian institutions or historical coverage. stored counts institutions, excluding the regulator.", "OSFI"),
+    ("sec", "SEC EDGAR issuers", "Single issuer submissions by 10-digit CIK or previously stored SEC ticker; limit caps recent filings, not issuers. Historical filing files are not fetched. Optional us-gaap USD financials use a 20 MiB cap; other requests retain the 2 MiB cap. stored counts issuers.", "SEC_SUBMISSIONS"),
 )
 
 _OSFI_FEDERAL = "Federally Regulated Financial Institutions"
@@ -104,7 +106,7 @@ def _page(payload, source):
         raise SourceError(f"{source}: invalid API response ({exc}); verify parameters or retry later.") from exc
 
 
-def _request_url(source, query, country, indicator, size, page, offset):
+def _request_url(source, query, country, indicator, size, page, offset, category=''):
     if source == "gleif":
         base = SOURCES["GLEIF"]
         params = {"page[size]": size, "page[number]": page, "sort": "lei"}
@@ -113,6 +115,8 @@ def _request_url(source, query, country, indicator, size, page, offset):
             params[f"filter[{field}]"] = query.upper() if field == "lei" else query
         if country:
             params["filter[entity.legalAddress.country]"] = country
+        if category:
+            params["filter[entity.category]"] = category
     elif source == "fdic":
         base = SOURCES["FDIC"]
         filters = "ACTIVE:1 AND INSFDIC:1"
@@ -138,6 +142,21 @@ def _request_url(source, query, country, indicator, size, page, offset):
     return base + "?" + urlencode(params)
 
 
+def _website(value, strip_scheme=False):
+    value = _text(value)
+    try:
+        parts = urlsplit(value)
+        if (parts.scheme.lower() not in ("http", "https") or not parts.hostname
+                or not re.match(r"https?://", value, re.IGNORECASE)
+                or parts.username is not None or parts.password is not None
+                or parts.port == 0 or "\\" in value
+                or any(c.isspace() or ord(c) < 32 for c in value)):
+            return None
+    except ValueError:
+        return None
+    return value.split("://", 1)[1] if strip_scheme else value
+
+
 def _gleif(row, indicator):
     attrs = _object(_object(row).get("attributes"))
     entity = _object(attrs.get("entity"))
@@ -147,13 +166,15 @@ def _gleif(row, indicator):
         raise ValueError("missing legal name or valid LEI")
     registration = _object(attrs.get("registration"))
     return {
-        "key": f"lei:{lei}", "kind": "legal_entity", "name": name, "lei": lei,
+        "key": f"lei:{lei}", "kind": "fund" if entity.get("category") == "FUND" else "legal_entity",
+        "name": name, "lei": lei, "website": _website(entity.get("website"), strip_scheme=True),
         "country": _text(_object(entity.get("legalAddress")).get("country")),
         "attrs": {"source_id": lei, "record_status": registration.get("status"),
                   "iso_jurisdiction": entity.get("jurisdiction"),
                   "gleif.entity_status": entity.get("status"),
                   "gleif.registration_status": registration.get("status"),
                   "gleif.category": entity.get("category"),
+                  "gleif.website": _text(entity.get("website")) or None,
                   "source_updated_at": registration.get("lastUpdateDate")},
     }
 
@@ -241,8 +262,153 @@ def _worldbank(row, indicator):
     }
 
 
+def _sec_cik(conn, query):
+    if re.fullmatch(r"[0-9]{10}", query):
+        return query
+    matches = set()
+    for key, tickers in conn.execute(
+        "SELECT e.key, a.v FROM entities e JOIN attributes a ON a.entity_id=e.id"
+        " WHERE a.k='sec.tickers' AND e.key LIKE 'cik:%'"
+    ):
+        if query in tickers.split(",") and re.fullmatch(r"cik:[0-9]{10}", key):
+            matches.add(key[4:])
+    if len(matches) != 1:
+        raise SourceError("SEC ticker is unresolved or ambiguous in the registry; fetch its 10-digit CIK first. No ticker directory is queried.")
+    return matches.pop()
+
+
+def _sec_date(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise ValueError("invalid SEC date")
+    date.fromisoformat(value)
+    return value
+
+
+def _sec_submissions(payload, cik, query, limit):
+    if not isinstance(payload, dict) or payload.get("error") or payload.get("errors"):
+        raise ValueError("expected submissions object")
+    if _integer(payload.get("cik")) != int(cik):
+        raise ValueError("submissions CIK mismatch")
+    name, entity_type = _text(payload.get("name")), _text(payload.get("entityType"))
+    tickers = payload.get("tickers")
+    if (not name or not entity_type or not isinstance(tickers, list)
+            or any(not isinstance(t, str) or not t.strip() or "," in t for t in tickers)):
+        raise ValueError("missing name, entityType or ticker array")
+    if not query.isdigit() and query not in tickers:
+        raise ValueError("ticker no longer matches submissions; use the CIK")
+    recent = payload["filings"]["recent"]
+    files = payload["filings"].get("files", [])
+    if not isinstance(recent, dict) or not isinstance(files, list):
+        raise ValueError("invalid filings object")
+    fields = ("form", "filingDate", "accessionNumber", "primaryDocument")
+    columns = [recent[field] for field in fields]
+    if any(not isinstance(column, list) for column in columns) or len({len(column) for column in columns}) != 1:
+        raise ValueError("filing arrays must have equal lengths")
+    filings = []
+    for form, filed, accession, document in zip(*columns):
+        segments = document.split("/") if isinstance(document, str) else []
+        if (not _text(form) or not isinstance(accession, str)
+                or not re.fullmatch(r"[0-9]{10}-[0-9]{2}-[0-9]{6}", accession)
+                or not segments or not all(segments)
+                or any(s in (".", "..") for s in segments)
+                or "\\" in document or any(ord(c) < 32 for c in document)):
+            raise ValueError("invalid filing row")
+        url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/{quote(document, safe='.-_/')}"
+        filings.append((form, _sec_date(filed), document, url))
+    filings.sort(key=lambda row: (row[1], row[3]), reverse=True)
+    return {
+        "key": f"cik:{cik}", "kind": "company" if entity_type == "operating" else "issuer",
+        "name": name, "website": _website(payload.get("website")),
+        "attrs": {"source_id": cik, "sec.cik": cik, "sec.entity_type": entity_type,
+                  "sec.tickers": ",".join(tickers), "sec.website": _text(payload.get("website")) or None},
+        "filings": filings[:limit],
+    }, len(filings), bool(files)
+
+
+def _sec_facts(payload, cik):
+    if (not isinstance(payload, dict) or _integer(payload.get("cik")) != int(cik)
+            or not isinstance(payload.get("facts"), dict)):
+        raise ValueError("invalid companyfacts object or CIK mismatch")
+    gaap = payload["facts"].get("us-gaap", {})
+    if not isinstance(gaap, dict):
+        raise ValueError("invalid us-gaap object")
+    tags = {
+        "total_assets": ("Assets",),
+        "total_liabilities": ("Liabilities",),
+        "total_equity": ("StockholdersEquity",),
+        "net_income": ("NetIncomeLoss",),
+        "revenue": ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+        "cash": ("CashAndCashEquivalentsAtCarryingValue",),
+    }
+    metrics, missing = [], []  # type: list[tuple[str, float, str]], list[str]
+
+    def candidates(tag):
+        units = _object(_object(gaap.get(tag)).get("units")).get("USD", [])
+        rows = []
+        for fact in units if isinstance(units, list) else []:
+            try:
+                value = fact["val"]
+                if type(value) not in (int, float) or not math.isfinite(value):
+                    continue
+                end, filed = _sec_date(fact["end"]), _sec_date(fact["filed"])
+                start = _sec_date(fact["start"]) if fact.get("start") else ""
+                rows.append((end, filed, start, json.dumps(fact, sort_keys=True), value))
+            except (KeyError, ValueError, TypeError, OverflowError):
+                continue
+        return rows
+
+    for metric, tag_names in tags.items():
+        pool: list[tuple[str, str, str, int, str, float]] = []
+        for index, tag in enumerate(tag_names):
+            pool.extend((end, filed, start, index, identity, value)
+                        for end, filed, start, identity, value in candidates(tag))
+        if not pool:
+            missing.extend(tag_names)
+            continue
+        latest = max((row[0], row[1]) for row in pool)
+        tied = [row for row in pool if (row[0], row[1]) == latest]
+        longest = min(row[2] or "9999-99-99" for row in tied)
+        finalists = [row for row in tied if (row[2] or "9999-99-99") == longest]
+        priority = min(row[3] for row in finalists)
+        finalists = [row for row in finalists if row[3] == priority]
+        end, _, _, _, _, value = max(finalists, key=lambda row: row[4])
+        metrics.append((metric, value, end))
+    return metrics, missing
+
+
+def _fetch_sec(conn, query, limit, financials, result):
+    cik = _sec_cik(conn, query)
+    client = HTTPClient()
+    url = f"{SOURCES['SEC_SUBMISSIONS']}/CIK{cik}.json"
+    try:
+        record, total, historical = _sec_submissions(client.get_json(url), cik, query, limit)
+        record["attrs"].update({"source": "sec", "source_url": url, "retrieved_at": client.retrieved_at})
+        result.update(fetched=1, total=1, pages=1, truncated=total > limit or historical)
+        if result["truncated"]:
+            result["warnings"].append("SEC filings are partial: only recent submissions filings, capped by limit; historical files are not fetched. Existing filings are retained.")
+        if financials:
+            facts_url = f"{SOURCES['SEC_FACTS']}/CIK{cik}.json"
+            facts_client = HTTPClient(max_bytes=20 * 1024 * 1024)
+            try:
+                metrics, missing = _sec_facts(facts_client.get_json(facts_url), cik)
+            except SourceError as exc:
+                raise SourceError(f"SEC companyfacts failed (20 MiB cap; submissions retain the 2 MiB cap). {exc}") from exc
+            record["metrics"] = metrics
+            record["attrs"].update({"sec.facts_retrieved": 1, "sec.facts_url": facts_url,
+                                    "sec.facts_retrieved_at": facts_client.retrieved_at,
+                                    "sec.facts_missing": ",".join(missing),
+                                    "sec.facts_currency": "USD",
+                                    "sec.facts_selection": "max(end, filed), then lexicographically greatest canonical JSON for exact ties; no form or frame preference"})
+            result["pages"] += 1
+            result["warnings"].extend(facts_client.warnings)
+    except (SourceError, KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise SourceError(f"sec: fetch failed; no ingestion writes applied. {exc}") from exc
+    return _store(conn, "sec", [record], result, client)
+
+
 def fetch_source(conn, source: str, query: str = '', country: str = '', limit: int = 25,
-                 indicator: str = 'NY.GDP.MKTP.CD') -> FetchResult:
+                 indicator: str = 'NY.GDP.MKTP.CD', category: str = '',
+                 financials: bool = False) -> FetchResult:
     if not all(isinstance(v, str) for v in (source, query, country, indicator)):
         raise SourceError("source, query, country and indicator must be strings.")
     source, query, country, indicator = source.strip().lower(), query.strip(), country.strip().upper(), indicator.strip()
@@ -265,10 +431,24 @@ def fetch_source(conn, source: str, query: str = '', country: str = '', limit: i
             raise SourceError("World Bank country must be a single two/three-character economy code or ALL.")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", indicator):
             raise SourceError("indicator must be a single World Bank indicator code.")
-    client = HTTPClient()
+    if not isinstance(category, str) or category not in ('', 'FUND', 'SOLE_PROPRIETOR'):
+        raise SourceError("category must be FUND or SOLE_PROPRIETOR, or empty.")
+    if category and source != "gleif":
+        raise SourceError("category is supported only for gleif.")
+    if type(financials) is not bool or (financials and source != "sec"):
+        raise SourceError("financials must be boolean and is supported only for sec.")
+    if source == "sec":
+        query = query.upper()
+        if country:
+            raise SourceError("SEC country must be empty.")
+        if not re.fullmatch(r"(?:[A-Z]{1,10}|[0-9]{10})", query):
+            raise SourceError("SEC query must be a ticker (1..10 letters) or a 10-digit CIK.")
     result: FetchResult = {"source": source, "fetched": 0, "stored": 0, "warnings": [],
               "truncated": False, "total": None, "pages": 0,
               "coverage": next(item[2] for item in _CATALOG if item[0] == source)}
+    if source == "sec":
+        return _fetch_sec(conn, query, limit, financials, result)
+    client = HTTPClient()
     size = min(limit, FETCH_PAGE_SIZE)
     mapped = []
     seen_pages = set()
@@ -278,7 +458,7 @@ def fetch_source(conn, source: str, query: str = '', country: str = '', limit: i
     estimated_total = False
     mapper = {"gleif": _gleif, "fdic": _fdic, "worldbank": _worldbank, "osfi": _osfi}[source]
     for page in range(1, FETCH_MAX_PAGES + 1):
-        url = _request_url(source, query, country, indicator, size, page, result["fetched"])
+        url = _request_url(source, query, country, indicator, size, page, result["fetched"], category)
         try:
             payload = client.get_json(url)
             rows, total, meta = _page(payload, source)
@@ -354,6 +534,10 @@ def fetch_source(conn, source: str, query: str = '', country: str = '', limit: i
             "Representative offices carry no automatic supervision claim; no regulator edge is inferred for them.",
             "stored counts imported institution records, excluding the regulator; absent records are not deleted and historical coverage is not claimed.",
         ])
+    return _store(conn, source, mapped, result, client)
+
+
+def _store(conn, source, mapped, result, client):
     result["warnings"].extend(client.warnings)
     savepoint = "fetch_" + uuid4().hex
     conn.execute(f"SAVEPOINT {savepoint}")
@@ -369,7 +553,21 @@ def fetch_source(conn, source: str, query: str = '', country: str = '', limit: i
         for record in mapped:
             attrs = record.pop("attrs")
             metric = record.pop("metric", None)
+            metrics = record.pop("metrics", [])
+            filings = record.pop("filings", [])
+            if source in ("gleif", "sec"):
+                kinds = ("legal_entity", "fund") if source == "gleif" else ("company", "issuer")
+                conn.execute("UPDATE entities SET kind=? WHERE key=? AND kind IN (?, ?)",
+                             (record["kind"], record["key"], *kinds))
             eid = upsert_entity(conn, **record)
+            if source in ("gleif", "sec"):
+                conn.execute("UPDATE entities SET website=? WHERE id=?", (record["website"], eid))
+                conn.execute("DELETE FROM attributes WHERE entity_id=? AND k=?",
+                             (eid, source + ".website"))
+            for form, filed, title, url in filings:
+                add_filing(conn, eid, form, filed, title, url, source="sec")
+            for key, value, period in metrics:
+                add_metric(conn, eid, key, value, period, source="sec")
             for key, value in attrs.items():
                 if value is not None:
                     set_attr(conn, eid, key, str(value))
