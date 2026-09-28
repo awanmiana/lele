@@ -5,10 +5,10 @@ import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
-from finworld.core.constants import OSFI_DATASET_URL, OSFI_RESOURCE_ID, SOURCES
-from finworld.core.registry import _SCHEMA, entity_payload, upsert_entity
-from finworld.fetchers import http, sources
-from finworld.fetchers.sources import SourceError, fetch_source
+from lele.core.constants import OSFI_DATASET_URL, OSFI_RESOURCE_ID, SOURCES
+from lele.core.registry import _SCHEMA, entity_payload, upsert_entity
+from lele.fetchers import http, sources
+from lele.fetchers.sources import SourceError, fetch_source
 
 
 FEDERAL = "Federally Regulated Financial Institutions"

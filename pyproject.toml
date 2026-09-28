@@ -3,28 +3,113 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "finworld"
-version = "0.1.0"
-description = "Global financial institutions intelligence: registry, live fetchers, and logical/sentiment analysis"
+name = "lele"
+version = "0.2.0"
+description = "lele - public-source financial research registry: provenance-first ingestion, time-window queries and reproducible analysis"
 requires-python = ">=3.11"
 
 [project.optional-dependencies]
 dev = ["ruff>=0.11,<1", "mypy>=1.15,<2"]
 
 [project.scripts]
-finworld = "finworld.cli.main:main"
+lele = "lele.cli.main:main"
 
 [tool.setuptools.packages.find]
-include = ["finworld*"]
+include = ["lele*"]
 
 [tool.ruff]
 target-version = "py311"
+# The previous selection (E4, E7, E9, F) caught syntax errors and unused
+# imports, so "All checks passed" said almost nothing about the code. This set
+# is chosen for rules that find defects, not for taste.
+lint.select = [
+    "F",      # pyflakes: undefined and unused names
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "B",      # bugbear: mutable defaults, loop-variable binding, shadowing
+    "C4",     # comprehensions
+    "SIM",    # simplifications that change readability
+    "RET",    # return-path consistency
+    "PIE",    # misc lints
+    "PERF",   # obvious performance problems
+    "RUF",    # ruff-specific correctness rules
+    "UP",     # pyupgrade: modern standard-library spelling
+    "A",      # builtin shadowing
+    "DTZ",    # naive datetimes
+    "T20",    # print() outside the CLI
+    "S",      # security
+    "ARG",    # unused arguments
+]
+lint.ignore = [
+    "E501",    # line length is not a defect and reflowing hurts review
+    "S101",    # assert: used as a real invariant in production code paths
+    "S311",    # non-cryptographic random: shuffling a sample, not generating a key
+    "S603",    # subprocess: the CLI invokes a fixed interpreter with a fixed argv
+    "S607",    # start-process-with-partial-path: PATH lookup is the point
+    "S608",    # string-built SQL: every site builds from a module constant or an
+               # internal table name, never from request input; values are bound
+    "S310",    # urlopen: the whole point of fetchers/http.py, which allowlists
+               # official HTTPS endpoints and refuses every other URL
+    "S314",    # ElementTree: every XML path refuses a DTD or entity declaration
+               # first, because expat expands internal entities
+    "ARG001",  # unused function argument: interface compatibility
+    "ARG002",
+    "ARG005",
+    "B008",
+    "B905",    # zip(strict=...): adding it would turn a length mismatch into a crash
+    "RUF001",  # typographic characters in the sentiment lexicon are the data
+    "RUF005",
+    "RUF007",
+    "RUF059",
+    "RUF012",  # mutable class default: the tables are read-only by convention
+    "C408",    # dict() vs {}: both spellings are used deliberately
+    "DTZ007",  # strptime(...).date(): only the calendar date is used, so there is
+               # no instant for a missing timezone to corrupt
+    "TRY003",  # long messages outside the exception class: the text is the interface
+    "UP036",   # the 3.11 guard is the documented runtime floor
+    "EM101",
+    "EM102",
+    "PLR2004", # magic value comparison: literals in this code are the specification
+]
 
-[tool.ruff.lint]
-select = ["E4", "E7", "E9", "F"]
+[tool.ruff.lint.per-file-ignores]
+# Tests assert and nest context managers deliberately; both are the point.
+"tests/*" = ["S", "T20", "ARG", "B011", "PLR2004", "N802", "E402", "SIM117", "B007",
+             "PERF401", "C416"]
+# The CLI's whole job is to print.
+"lele/cli/main.py" = ["T20"]
+"lele/scripts/*" = ["T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["lele"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["finworld"]
+files = ["lele"]
+# Bodies are checked even where a signature carries no annotation, which is
+# where most of the real type errors in this codebase were found.
 check_untyped_defs = true
+# Requiring an annotation everywhere is a ratchet the historical code has not
+# paid yet; announcing it as a gate that passes would be false. The overrides
+# below require it of the foundation modules, so the debt cannot grow there.
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+strict_equality = true
+show_error_codes = true
 
+# The foundation — connection handling, schema, clock, network — must be fully
+# annotated. These are the modules every other one depends on, so an `Any`
+# leaking from here hides errors everywhere else.
+[[tool.mypy.overrides]]
+module = [
+    "lele.core.db",
+    "lele.core.clock",
+    "lele.core.schema",
+    "lele.fetchers.http",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true

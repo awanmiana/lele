@@ -1,5 +1,6 @@
 import copy
 import io
+import itertools
 import json
 import os
 import sqlite3
@@ -11,10 +12,12 @@ from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 
-from finworld.core.constants import SOURCES
-from finworld.core.registry import _SCHEMA, entity_payload, upsert_entity
-from finworld.fetchers import http, sources
-from finworld.fetchers.sources import SourceError, fetch_source, list_sources
+from lele.core import constants
+from lele.core.constants import (EVIDENCE_ENDPOINTS, REDIRECT_ENDPOINTS, SANCTIONS_ENDPOINTS,
+                                     SOURCES)
+from lele.core.registry import _SCHEMA, entity_payload, list_ingest_runs, upsert_entity
+from lele.fetchers import http, sources
+from lele.fetchers.sources import SourceError, fetch_source, list_sources
 
 
 LEI = "01ERPZV3DOLNXY2MLB90"
@@ -170,6 +173,16 @@ class FetcherTests(unittest.TestCase):
         row["attributes"]["lei"] = lei
         return {"data": row}
 
+    def parent_relationship(self, child_lei="00000000000000000001", parent_lei=LEI,
+                            type_="IS_DIRECTLY_CONSOLIDATED_BY", status="ACTIVE", end=None):
+        return {"data": {"type": "relationship-records", "attributes": {
+            "relationship": {
+                "startNode": {"id": child_lei, "type": "LEI"},
+                "endNode": end if end is not None else {"id": parent_lei, "type": "LEI"},
+                "type": type_, "status": status},
+            "registration": {"status": "PUBLISHED", "lastUpdateDate": "2026-09-17T00:00:00Z"},
+        }}}
+
     def manager_relationship(self, fund=1, manager=LEI):
         return {"data": {"attributes": {
             "relationship": {"startNode": {"id": f"{fund:020}"}, "endNode": {"id": manager},
@@ -185,12 +198,14 @@ class FetcherTests(unittest.TestCase):
                                             SourceError("HTTP 404")]
         progress = Mock()
         result = sources.edge_fund_managers(self.conn, 25, progress=progress)
-        self.assertEqual(set(result), {"processed", "linked", "missing", "skipped", "warnings", "edges"})
+        self.assertEqual(set(result), {"processed", "linked", "missing", "retracted", "skipped",
+                                       "warnings", "edges"})
         self.assertEqual([result[k] for k in ("processed", "linked", "missing", "skipped")], [3, 2, 1, 0])
         self.assertEqual(len(result["warnings"]), 2)
         self.assertEqual(len(result["edges"]), 2)
         self.assertEqual(progress.call_count, 3)
-        rows = [dict(row) for row in self.conn.execute("SELECT * FROM edges ORDER BY src_id")]
+        rows = [dict(row) for row in self.conn.execute(
+            "SELECT src_id, rel, dst_id, source_url, observed_at, evidence FROM edges ORDER BY src_id")]
         self.assertEqual(rows, result["edges"])
         for fund_id, manager_lei, row in zip(funds, (LEI, second_lei), rows):
             self.assertEqual(row["source_url"], f"{SOURCES['GLEIF']}/{fund_id:020}/fund-manager")
@@ -232,15 +247,73 @@ class FetcherTests(unittest.TestCase):
         self.client.get_json.assert_not_called()
         self.assertEqual(self.conn.execute("SELECT count(*) FROM entities WHERE key=?", (f"lei:{LEI}",)).fetchone()[0], 1)
 
-    def test_manager_edges_first_request_failure_no_writes(self):
-        self.manager_funds(1)
-        before = list(self.conn.iterdump())
+    def test_manager_edges_refresh_retracts_missing_and_preserves_history(self):
+        funds = self.manager_funds(1)
+        self.client.get_json.side_effect = [self.manager_payload(), self.manager_relationship()]
+        first = sources.edge_fund_managers(self.conn, 1)
+        self.assertEqual(first["linked"], 1)
+        self.client.get_json.reset_mock(side_effect=True)
+        self.client.get_json.side_effect = SourceError("HTTP 404")
+        refreshed = sources.edge_fund_managers(self.conn, 1, refresh=True)
+        self.assertEqual((refreshed["processed"], refreshed["linked"], refreshed["missing"],
+                          refreshed["retracted"]), (1, 0, 1, 1))
+        row = self.conn.execute("SELECT status, evidence FROM edges WHERE src_id=?",
+                                (funds[0],)).fetchone()
+        self.assertEqual(row["status"], "retracted")
+        self.assertIn("subresource", row["evidence"])
+        self.client.get_json.reset_mock(side_effect=True)
+        self.client.get_json.side_effect = [self.manager_payload(), self.manager_relationship()]
+        again = sources.edge_fund_managers(self.conn, 1)
+        self.assertEqual((again["linked"], again["skipped"]), (1, 0))
+        row = self.conn.execute("SELECT status, seen_count FROM edges WHERE src_id=?",
+                                (funds[0],)).fetchone()
+        self.assertEqual(tuple(row), ("active", 2))
+
+    def test_manager_edges_refresh_replaces_previous_manager(self):
+        funds = self.manager_funds(1)
+        self.client.get_json.side_effect = [self.manager_payload(), self.manager_relationship()]
+        sources.edge_fund_managers(self.conn, 1)
+        old_manager = self.conn.execute("SELECT dst_id FROM edges WHERE src_id=?",
+                                        (funds[0],)).fetchone()[0]
+        replacement = "5493001JY2KC4SJGF862"
+        self.client.get_json.reset_mock(side_effect=True)
+        self.client.get_json.side_effect = [self.manager_payload(replacement),
+                                            self.manager_relationship(manager=replacement)]
+        result = sources.edge_fund_managers(self.conn, 1, refresh=True)
+        self.assertEqual((result["linked"], result["retracted"]), (1, 1))
+        rows = {row["dst_id"]: row["status"] for row in self.conn.execute(
+            "SELECT dst_id, status FROM edges WHERE src_id=?", (funds[0],))}
+        self.assertEqual(rows[old_manager], "retracted")
+        self.assertEqual(len(rows), 2)
+
+    def test_manager_edges_retry_queue_deprioritizes_failures(self):
+        funds = self.manager_funds(3)
+        for expected in (funds[0], funds[1], funds[2]):
+            self.client.get_json.reset_mock(side_effect=True)
+            self.client.get_json.side_effect = SourceError("HTTP 404")
+            result = sources.edge_fund_managers(self.conn, 1)
+            self.assertEqual((result["processed"], result["missing"]), (1, 1))
+            self.client.get_json.assert_called_once_with(
+                f"{SOURCES['GLEIF']}/{expected:020}/fund-manager")
+        self.client.get_json.reset_mock(side_effect=True)
+        self.client.get_json.side_effect = SourceError("HTTP 404")
+        sources.edge_fund_managers(self.conn, 1)
+        self.client.get_json.assert_called_once_with(f"{SOURCES['GLEIF']}/{funds[0]:020}/fund-manager")
+
+    def test_manager_edges_first_request_failure_records_retry_only(self):
+        funds = self.manager_funds(1)
         self.client.get_json.side_effect = SourceError("HTTP 503 token=SECRET")
         result = sources.edge_fund_managers(self.conn, 1)
         self.assertEqual((result["processed"], result["missing"], result["linked"]), (1, 1, 0))
         self.assertEqual(len(result["warnings"]), 1)
         self.assertNotIn("SECRET", result["warnings"][0])
-        self.assertEqual(list(self.conn.iterdump()), before)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM entities").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM edges").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM attributes").fetchone()[0], 0)
+        retry = self.conn.execute("SELECT failures, last_attempt_at FROM edge_retry WHERE src_id=?",
+                                  (funds[0],)).fetchone()
+        self.assertEqual((retry["failures"], retry["last_attempt_at"]),
+                         (1, "2025-02-01T00:00:00+00:00"))
         self.assertTrue(self.conn.in_transaction)
         self.client.get_json.assert_called_once()
 
@@ -267,22 +340,78 @@ class FetcherTests(unittest.TestCase):
         self.assertEqual(sources.edge_fund_managers(self.conn, 1)["missing"], 1)
         self.client.get_json.assert_not_called()
 
-    def test_manager_edges_invalid_corroboration_falls_back(self):
+    def test_manager_edges_unavailable_corroboration_falls_back(self):
         self.manager_funds(1)
-        variants = [None, {}, {"data": []}, self.manager_relationship(fund=2),
-                    self.manager_relationship(manager="5493001JY2KC4SJGF862")]
-        for field, value in (("type", "IS_DIRECTLY_CONSOLIDATED_BY"), ("status", "INACTIVE")):
-            payload = self.manager_relationship()
-            payload["data"]["attributes"]["relationship"][field] = value
-            variants.append(payload)
-        for payload in variants:
+        for payload in (None, {}, {"data": []}, {"errors": [{"status": "404"}]}, SourceError("HTTP 503")):
             with self.subTest(payload=payload):
                 self.client.get_json.side_effect = [self.manager_payload(), payload]
                 result = sources.edge_fund_managers(self.conn, 1)
                 self.assertEqual((result["linked"], result["missing"]), (1, 0))
                 self.assertEqual(len(result["warnings"]), 1)
+                self.assertIn("using fund-manager record only", result["warnings"][0])
                 self.assertNotIn("relationship", result["edges"][0]["evidence"])
                 self.assertEqual(entity_payload(self.conn, 1)["attributes"], {})
+                self.conn.execute("DELETE FROM edges")
+
+    def test_manager_edges_conflicting_corroboration_rejected_without_writes(self):
+        funds = self.manager_funds(1)
+        variants = [self.manager_relationship(fund=2),
+                    self.manager_relationship(manager="5493001JY2KC4SJGF862")]
+        for field, value in (("type", "IS_DIRECTLY_CONSOLIDATED_BY"), ("status", "INACTIVE"),
+                             ("status", "UNKNOWN")):
+            payload = self.manager_relationship()
+            payload["data"]["attributes"]["relationship"][field] = value
+            variants.append(payload)
+        variants.append({"data": {"attributes": {"relationship": {"status": "INACTIVE"}}}})
+        for payload in variants:
+            with self.subTest(payload=payload):
+                self.client.get_json.side_effect = [self.manager_payload(), payload]
+                progress = Mock()
+                result = sources.edge_fund_managers(self.conn, 1, progress=progress)
+                self.assertEqual([result[k] for k in ("processed", "linked", "missing", "skipped")], [1, 0, 1, 0])
+                self.assertEqual(result["edges"], [])
+                self.assertEqual(len(result["warnings"]), 1)
+                self.assertIn("conflict", result["warnings"][0])
+                self.assertIn("no edge stored", result["warnings"][0])
+                self.assertEqual(self.conn.execute("SELECT count(*) FROM edges").fetchone()[0], 0)
+                self.assertEqual(self.conn.execute("SELECT count(*) FROM entities").fetchone()[0], 1)
+                retry = self.conn.execute("SELECT failures FROM edge_retry WHERE src_id=?",
+                                          (funds[0],)).fetchone()
+                self.assertGreaterEqual(retry["failures"], 1)
+                progress.assert_called_once_with({"processed": 1, "linked": 0, "missing": 1, "skipped": 0})
+
+    def test_manager_edges_relationship_period_start_requires_trustworthy_timestamps(self):
+        self.manager_funds(1)
+        retrieved = "2025-02-01T00:00:00Z"
+        for start, observed, period_type, rejected in (
+            ("2025-02-01T00:00:01Z", retrieved, "RELATIONSHIP_PERIOD", True),
+            ("2025-02-01T00:30:00-01:00", retrieved, "RELATIONSHIP_PERIOD", True),
+            ("2025-02-01T01:00:00+01:00", retrieved, "RELATIONSHIP_PERIOD", False),
+            ("2025-01-01T00:00:00Z", retrieved, "RELATIONSHIP_PERIOD", False),
+            ("2025-02-30T00:00:00Z", retrieved, "RELATIONSHIP_PERIOD", False),
+            ("2030-01-01T00:00:00", retrieved, "RELATIONSHIP_PERIOD", False),
+            ("2030-01-01T00:00:00Z", "unknown", "RELATIONSHIP_PERIOD", False),
+            ("2030-01-01T00:00:00Z", retrieved, "ACCOUNTING_PERIOD", False),
+        ):
+            with self.subTest(start=start, observed=observed, period_type=period_type):
+                payload = self.manager_relationship()
+                payload["data"]["attributes"]["relationship"]["periods"] = [
+                    {"type": period_type, "startDate": start, "endDate": "2040-01-01T00:00:00Z"},
+                ]
+
+                def response(url, _observed=observed, _payload=payload):
+                    self.client.retrieved_at = _observed if url.endswith("-relationship") else "2045-01-01T00:00:00Z"
+                    return _payload if url.endswith("-relationship") else self.manager_payload()
+
+                self.client.get_json.side_effect = response
+                result = sources.edge_fund_managers(self.conn, 1)
+                self.assertEqual((result["linked"], result["missing"]), (int(not rejected), int(rejected)))
+                if rejected:
+                    self.assertIn("conflict", result["warnings"][0])
+                    self.assertEqual(self.conn.execute("SELECT count(*) FROM edges").fetchone()[0], 0)
+                else:
+                    self.assertEqual(result["warnings"], [])
+                    self.assertEqual(len(result["edges"]), 1)
                 self.conn.execute("DELETE FROM edges")
 
     def test_manager_edges_identifier_fallback_and_fund_manager_category(self):
@@ -336,6 +465,109 @@ class FetcherTests(unittest.TestCase):
                 sources.edge_fund_managers(self.conn, 1)
         self.assertEqual(list(self.conn.iterdump()), before)
         self.assertTrue(self.conn.in_transaction)
+
+    def test_parent_edges_link_and_provenance(self):
+        children = self.manager_funds(1)
+        self.client.get_json.side_effect = [
+            self.parent_relationship(child_lei="00000000000000000001"), self.manager_payload()]
+        result = sources.edge_parents(self.conn, 1)
+        self.assertEqual(set(result), {"processed", "linked", "no_parent", "exceptions", "missing",
+                                       "retracted", "skipped", "warnings", "edges"})
+        self.assertEqual([result[k] for k in ("processed", "linked", "no_parent", "exceptions",
+                                              "missing", "retracted", "skipped")], [1, 1, 0, 0, 0, 0, 0])
+        edge = result["edges"][0]
+        self.assertEqual((edge["rel"], edge["src_id"]), ("subsidiary_of", children[0]))
+        self.assertIn("IS_DIRECTLY_CONSOLIDATED_BY", edge["evidence"])
+        row = self.conn.execute("SELECT rel, status, seen_count, evidence FROM edges").fetchone()
+        self.assertEqual((row["rel"], row["status"], row["seen_count"]), ("subsidiary_of", "active", 1))
+        parent = entity_payload(self.conn, edge["dst_id"])
+        self.assertEqual(parent["key"], f"lei:{LEI}")
+        attrs = entity_payload(self.conn, children[0])["attributes"]
+        self.assertEqual(json.loads(attrs["gleif.direct_parent_relationship"]),
+                         self.parent_relationship(child_lei="00000000000000000001")["data"]["attributes"])
+        self.assertTrue(attrs["gleif.direct_parent_relationship.source_url"].endswith(
+            "/direct-parent-relationship"))
+
+    def test_parent_edges_no_parent_and_exception(self):
+        children = self.manager_funds(1)
+        self.client.get_json.side_effect = SourceError("HTTP 404")
+        no_parent = sources.edge_parents(self.conn, 1)
+        self.assertEqual((no_parent["processed"], no_parent["no_parent"], no_parent["linked"]),
+                         (1, 1, 0))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM edges").fetchone()[0], 0)
+        for unusable in (self.parent_relationship(end={"id": None, "type": "CONGLOMERATE"}),
+                         self.parent_relationship(status="INACTIVE"),
+                         self.parent_relationship(type_="IS_INTERNATIONAL_BRANCH_OF")):
+            self.client.get_json.reset_mock(side_effect=True)
+            self.client.get_json.return_value = unusable
+            result = sources.edge_parents(self.conn, 1)
+            self.assertEqual((result["exceptions"], result["linked"]), (1, 0))
+            self.assertEqual(self.conn.execute("SELECT count(*) FROM edges").fetchone()[0], 0)
+            attrs = entity_payload(self.conn, children[0])["attributes"]
+            self.assertIn("gleif.direct_parent_exception", attrs)
+            self.assertNotIn("gleif.direct_parent_relationship", attrs)
+            self.conn.execute("DELETE FROM attributes WHERE k='gleif.direct_parent_exception'")
+
+    def test_parent_edges_ultimate_level_and_type_mismatch(self):
+        children = self.manager_funds(1)
+        self.client.get_json.side_effect = [
+            self.parent_relationship(child_lei="00000000000000000001",
+                                     type_="IS_ULTIMATELY_CONSOLIDATED_BY"),
+            self.manager_payload()]
+        result = sources.edge_parents(self.conn, 1, level="ultimate")
+        self.assertEqual((result["linked"], result["exceptions"]), (1, 0))
+        edge = result["edges"][0]
+        self.assertEqual(edge["rel"], "ultimate_subsidiary_of")
+        self.assertIn("IS_ULTIMATELY_CONSOLIDATED_BY", edge["evidence"])
+        attrs = entity_payload(self.conn, children[0])["attributes"]
+        self.assertIn("gleif.ultimate_parent_relationship", attrs)
+        self.assertNotIn("gleif.direct_parent_relationship", attrs)
+        self.conn.execute("DELETE FROM edges")
+        self.client.get_json.reset_mock(side_effect=True)
+        self.client.get_json.return_value = self.parent_relationship(
+            child_lei="00000000000000000001", type_="IS_DIRECTLY_CONSOLIDATED_BY")
+        mismatch = sources.edge_parents(self.conn, 1, level="ultimate")
+        self.assertEqual((mismatch["exceptions"], mismatch["linked"]), (1, 0))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM edges").fetchone()[0], 0)
+        with self.assertRaises(SourceError):
+            sources.edge_parents(self.conn, 1, level="sideways")
+
+    def test_parent_edges_refresh_retracts_missing_and_replaces(self):
+        children = self.manager_funds(1)
+        self.client.get_json.side_effect = [
+            self.parent_relationship(child_lei="00000000000000000001"), self.manager_payload()]
+        sources.edge_parents(self.conn, 1)
+        self.client.get_json.reset_mock(side_effect=True)
+        self.client.get_json.side_effect = SourceError("HTTP 404")
+        refreshed = sources.edge_parents(self.conn, 1, refresh=True, progress=None)
+        self.assertEqual((refreshed["no_parent"], refreshed["retracted"]), (1, 1))
+        row = self.conn.execute("SELECT status FROM edges WHERE src_id=?",
+                                (children[0],)).fetchone()
+        self.assertEqual(row["status"], "retracted")
+        replacement = "5493001JY2KC4SJGF862"
+        self.client.get_json.reset_mock(side_effect=True)
+        self.client.get_json.side_effect = [
+            self.parent_relationship(child_lei="00000000000000000001", parent_lei=replacement),
+            self.manager_payload(replacement)]
+        replaced = sources.edge_parents(self.conn, 1)
+        self.assertEqual(replaced["linked"], 1)
+        edges = [dict(r) for r in self.conn.execute(
+            "SELECT dst_id, status FROM edges WHERE src_id=? ORDER BY dst_id", (children[0],))]
+        self.assertEqual(len(edges), 2)
+        self.assertEqual(sum(1 for e in edges if e["status"] == "active"), 1)
+
+    def test_parent_edges_validation_and_invalid_local_lei(self):
+        for limit in (0, 1001, True, "25"):
+            with self.subTest(limit=limit), self.assertRaises(SourceError):
+                sources.edge_parents(self.conn, limit)
+        with self.assertRaises(SourceError):
+            sources.edge_parents(self.conn, 1, refresh="yes")
+        children = self.manager_funds(1)
+        self.conn.execute("UPDATE entities SET key='lei:../invalid' WHERE id=?", (children[0],))
+        self.client.get_json.reset_mock()
+        result = sources.edge_parents(self.conn, 1)
+        self.assertEqual((result["processed"], result["missing"], result["linked"]), (1, 1, 0))
+        self.client.get_json.assert_not_called()
 
     def test_sec_submissions_filings_limit_provenance_and_ticker(self):
         self.client.get_json.return_value = sec_submissions()
@@ -394,17 +626,24 @@ class FetcherTests(unittest.TestCase):
         self.assertEqual(result["pages"], 2)
         self.assertEqual(self.factory.call_args.kwargs, {"max_bytes": 20 * 1024 * 1024})
         data = self.payload()
-        values = {m["k"]: m["v"] for m in data["metrics"]}
+        values = {m["k"]: str(json.loads(m["v"])["value"]) for m in data["metrics"]}
         self.assertEqual(values, {"total_assets": "200", "total_equity": "40", "net_income": "-5", "revenue": "80", "cash": "0"})
         self.assertTrue(all(m["source"] == "sec" and m["period"] == "2024-12-31" for m in data["metrics"]))
-        self.assertEqual(data["attributes"]["sec.facts_missing"], "Liabilities")
+        income = next(json.loads(m["v"]) for m in data["metrics"] if m["k"] == "net_income")
+        self.assertTrue(income["observation"]["ambiguous"])
+        self.assertTrue(any("ambiguous" in warning for warning in result["warnings"]))
+        self.assertEqual(data["attributes"]["sec.facts_missing"].split(","), [
+            "Liabilities", "InventoryNet", "LongTermDebtCurrent", "LongTermDebtNoncurrent",
+            "ShortTermBorrowings", "NetCashProvidedByUsedInOperatingActivities",
+            "NetCashProvidedByUsedInInvestingActivities", "NetCashProvidedByUsedInFinancingActivities",
+        ])
         self.assertEqual(data["attributes"]["sec.facts_retrieved"], "1")
         self.assertEqual(data["attributes"]["sec.facts_url"], SOURCES["SEC_FACTS"] + "/CIK0000320193.json")
         gaap["NetIncomeLoss"]["units"]["USD"].reverse()
         gaap["Revenues"] = {"units": {"USD": [sec_fact(90)]}}
         self.client.get_json.side_effect = [sec_submissions(), facts]
         fetch_source(self.conn, "sec", query="0000320193", financials=True)
-        values = {m["k"]: m["v"] for m in self.payload()["metrics"]}
+        values = {m["k"]: str(json.loads(m["v"])["value"]) for m in self.payload()["metrics"]}
         self.assertEqual((values["net_income"], values["revenue"]), ("-5", "90"))
         self.assertEqual(len(values), 5)
 
@@ -424,7 +663,7 @@ class FetcherTests(unittest.TestCase):
         facts = {"cik": 320193, "facts": {"us-gaap": gaap}}
         self.client.get_json.side_effect = [sec_submissions(), facts]
         fetch_source(self.conn, "sec", query="0000320193", financials=True)
-        metrics = {m["k"]: (m["v"], m["period"]) for m in self.payload()["metrics"]}
+        metrics = {m["k"]: (str(json.loads(m["v"])["value"]), m["period"]) for m in self.payload()["metrics"]}
         self.assertEqual(metrics["revenue"], ("364357000000", "2026-06-27"))
         self.assertEqual(metrics["net_income"], ("101464000000", "2026-06-27"))
         self.assertNotIn("total_liabilities", metrics)
@@ -478,6 +717,20 @@ class FetcherTests(unittest.TestCase):
         self.assertTrue(result["truncated"])
         self.assertTrue(any("historical" in w for w in result["warnings"]))
         self.assertEqual(self.conn.execute("SELECT count(*) FROM filings").fetchone()[0], 3)
+
+    def test_fetch_records_durable_ingest_run(self):
+        self.fetch("fdic", [FDIC_ROW], query="00014", country="USA")
+        runs = list_ingest_runs(self.conn, 10)
+        self.assertEqual(len(runs), 1)
+        run = runs[0]
+        self.assertEqual((run["source"], run["status"], run["stored"]), ("fdic", "completed", 1))
+        self.assertEqual(len(run["request_sha256"]), 64)
+        self.assertEqual(len(run["records_sha256"]), 64)
+        self.assertFalse(run["truncated"])
+        self.client.get_json.side_effect = SourceError("HTTP 500")
+        with self.assertRaises(SourceError):
+            fetch_source(self.conn, "fdic", query="00014", country="USA")
+        self.assertEqual(len(list_ingest_runs(self.conn, 10)), 1)
 
     def test_fdic_mapping_filter_and_no_website_guess(self):
         self.fetch("fdic", [FDIC_ROW], query="00014", country="USA")
@@ -636,6 +889,49 @@ class FetcherTests(unittest.TestCase):
         self.assertTrue(result["truncated"])
         self.assertTrue(any("short numbered page" in w for w in result["warnings"]))
 
+    def test_fetch_records_pages_and_resumes_offset_source(self):
+        with patch.object(sources, "FETCH_PAGE_SIZE", 2):
+            self.client.get_json.side_effect = [page("fdic", [fdic_row(1), fdic_row(2)], 4)]
+            first = fetch_source(self.conn, "fdic", limit=2)
+        self.assertTrue(first["truncated"])
+        run = list_ingest_runs(self.conn, 1)[0]
+        self.assertTrue(run["resumable"])
+        self.assertEqual((run["next_offset"], run["next_page"]), (2, 2))
+        self.assertEqual(run["pages_detail"], [{"page": 1, "offset": 0, "rows": 2, "selected": 2}])
+        self.client.get_json.reset_mock(side_effect=True)
+        self.client.get_json.side_effect = [page("fdic", [fdic_row(3), fdic_row(4)], 4)]
+        with patch.object(sources, "FETCH_PAGE_SIZE", 2):
+            second = fetch_source(self.conn, "fdic", limit=2, resume=True)
+        self.assertEqual(self.params(0)["offset"], ["2"])
+        self.assertEqual(second["fetched"], 2)
+        self.client.get_json.reset_mock(side_effect=True)
+        self.client.get_json.side_effect = [page("fdic", [fdic_row(5), fdic_row(6)], 10)]
+        with patch.object(sources, "FETCH_PAGE_SIZE", 2):
+            fetch_source(self.conn, "fdic", limit=1)
+        self.assertFalse(list_ingest_runs(self.conn, 1)[0]["resumable"])
+
+    def test_fetch_resumes_page_source_and_requires_checkpoint(self):
+        with patch.object(sources, "FETCH_PAGE_SIZE", 1):
+            self.client.get_json.side_effect = [page("gleif", [GLEIF_ROW], 3)]
+            fetch_source(self.conn, "gleif", limit=1)
+        run = list_ingest_runs(self.conn, 1)[0]
+        self.assertTrue(run["resumable"])
+        self.assertEqual((run["next_offset"], run["next_page"]), (1, 2))
+        self.client.get_json.reset_mock(side_effect=True)
+        second_row = copy.deepcopy(GLEIF_ROW)
+        second_row["attributes"]["lei"] = "529900T8BM49AURSDO55"
+        self.client.get_json.side_effect = [page("gleif", [second_row], 3)]
+        with patch.object(sources, "FETCH_PAGE_SIZE", 1):
+            fetch_source(self.conn, "gleif", limit=1, resume=True)
+        self.assertEqual(self.params(0)["page[number]"], ["2"])
+        self.client.get_json.reset_mock(side_effect=True)
+        with self.assertRaisesRegex(SourceError, "no resumable checkpoint"):
+            fetch_source(self.conn, "osfi", resume=True)
+        with self.assertRaisesRegex(SourceError, "not supported for SEC"):
+            fetch_source(self.conn, "sec", query="0000320193", resume=True)
+        with self.assertRaises(SourceError):
+            fetch_source(self.conn, "fdic", resume="yes")
+
     def test_cache_warnings_propagate(self):
         self.client.warnings = ["HTTP cache write failed"]
         result = self.fetch("fdic", [FDIC_ROW])
@@ -647,6 +943,32 @@ class Response(io.BytesIO):
         super().__init__(raw)
         self.headers = headers or {}
         self.status = status
+
+
+class DownloadResponse(io.BytesIO):
+    def __init__(self, chunks, headers=None, status=200):
+        super().__init__(b"".join(chunks))
+        self._chunks = list(chunks)
+        self.status = status
+        self.headers = Message() if headers is None else headers
+
+    def read1(self, size=-1):
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+class StallingResponse(io.BytesIO):
+    """A body that keeps producing bytes forever, like a provider that never ends."""
+
+    status = 200
+
+    def __init__(self):
+        super().__init__(b"")
+        self.headers = Message()
+        self.served = 0
+
+    def read1(self, size=-1):
+        self.served += 1
+        return b"x" * 16
 
 
 class HTTPTests(unittest.TestCase):
@@ -661,8 +983,8 @@ class HTTPTests(unittest.TestCase):
         self.url = SOURCES["FDIC"] + "?limit=1"
         http._last_request.clear()
 
-    def respond(self, raw=b'{"data":[]}', headers=None):
-        response = Response(raw, headers)
+    def respond(self, raw=b'{"data":[]}', headers=None, status=200):
+        response = Response(raw, headers, status)
         self.client.opener.open.return_value = response
         return response
 
@@ -699,7 +1021,11 @@ class HTTPTests(unittest.TestCase):
         sleep.assert_called_once_with(1.0)
         request = self.client.opener.open.call_args.args[0]
         self.assertEqual(request.get_header("Accept"), "application/json")
-        self.assertEqual(request.get_header("User-agent"), "finworld/0.1 (public financial data research CLI)")
+        # Derived, not written down: the string providers see must always carry the
+        # current name and version, and a literal here would go stale at the next
+        # rename without anything failing.
+        self.assertEqual(request.get_header("User-agent"), constants.USER_AGENT)
+        self.assertTrue(constants.USER_AGENT.startswith(f"{constants.APP_NAME}/"))
         self.assertEqual(self.client.max_bytes, 2 * 1024 * 1024)
         larger = http.HTTPClient(cache_dir=None, max_bytes=20 * 1024 * 1024)
         larger.opener = Mock()
@@ -726,6 +1052,7 @@ class HTTPTests(unittest.TestCase):
 
     def test_corrupt_oversized_and_expired_cache(self):
         path = self.client._cache_path(self.url)
+        path.parent.mkdir(parents=True, exist_ok=True)
         for raw in (b"broken", b"x" * (self.client.max_bytes + 4097),
                     json.dumps({"url": self.url, "time": 0, "payload": {"old": True}}).encode()):
             path.write_bytes(raw)
@@ -739,7 +1066,8 @@ class HTTPTests(unittest.TestCase):
         with patch.object(http.os, "replace", side_effect=PermissionError("denied")):
             self.assertEqual(self.client.get_json(self.url), {"data": []})
         self.assertTrue(any("write failed" in w for w in self.client.warnings))
-        self.assertEqual(list(Path(self.temp.name).iterdir()), [])
+        self.assertEqual([p for p in Path(self.temp.name).rglob("*.json")], [],
+                         "a failed write must not leave a partial cache entry")
 
     def test_cache_read_permission_error(self):
         self.respond()
@@ -753,19 +1081,37 @@ class HTTPTests(unittest.TestCase):
         self.client.get_json(self.url)
         self.assertEqual(list(Path(self.temp.name).iterdir()), [])
 
-    def test_cache_storage_has_bounded_slots(self):
+    def test_every_url_gets_its_own_cache_entry(self):
+        """Distinct URLs must not share a cache file.
+
+        The name used to be the URL's hash modulo 128, so roughly one request in
+        a hundred overwrote another's entry and the cache could never hold more
+        than 128 series no matter how many endpoints were read.
+        """
+        same = {self.client._cache_path(self.url) for _ in range(5)}
+        self.assertEqual(len(same), 1, "one URL must always map to one entry")
         paths = {self.client._cache_path(self.url + f"&offset={i}") for i in range(1000)}
-        self.assertLessEqual(len(paths), 128)
+        self.assertEqual(len(paths), 1000, "distinct URLs must not collide")
+        for path in paths:
+            self.assertEqual(path.suffix, ".json")
+            self.assertTrue(path.is_relative_to(Path(self.temp.name)))
 
     def test_byte_limits_and_content_encoding(self):
         self.client.max_bytes = 10
         for raw, headers in ((b"x" * 11, {}), (b"{}", {"Content-Length": "11"}),
                              (b"{}", {"Content-Length": "bad"}),
-                             (b"{}", {"Content-Encoding": "gzip"})):
+                             (b"not actually gzip", {"Content-Encoding": "gzip"}),
+                             (b"{}", {"Content-Encoding": "br"})):
             response = self.respond(raw, headers)
             with self.subTest(headers=headers), self.assertRaises(SourceError):
                 self.client.get_json(self.url)
             self.assertTrue(response.closed)
+
+    def test_compressed_response_is_decoded(self):
+        import gzip as _gzip
+
+        self.respond(_gzip.compress(b'{"data": []}'), {"Content-Encoding": "gzip"})
+        self.assertEqual(self.client.get_json(self.url), {"data": []})
 
     def test_invalid_json_not_cached(self):
         for raw in (b"<html>blocked</html>", b"\xff", b"null", b"42", b'{"x":NaN}'):
@@ -809,11 +1155,19 @@ class HTTPTests(unittest.TestCase):
                 self.client.get_json(self.url)
 
     def test_response_deadline(self):
-        response = self.respond()
-        with patch.object(http.time, "monotonic", side_effect=[0, 0, 0, 21]):
+        """A body that never ends must be refused on time, not merely on size."""
+        responses = [StallingResponse() for _ in range(http.ATTEMPTS)]
+        self.client.opener.open.side_effect = responses
+        self.client.max_bytes = 10 ** 9
+        ticks = itertools.count(0.0, 1.0)
+        with patch.object(http.time, "monotonic", side_effect=lambda: next(ticks)), \
+                patch.object(http.time, "sleep"):
             with self.assertRaisesRegex(SourceError, "deadline"):
                 self.client.get_json(self.url)
-        self.assertTrue(response.closed)
+        for response in responses:
+            self.assertTrue(response.closed, "a timed-out body must not be left open")
+            self.assertLessEqual(response.served, self.client.timeout + 4,
+                                 "the read must stop near the deadline, not run on")
 
     def test_host_politeness(self):
         self.client.rate = 1.5
@@ -822,6 +1176,82 @@ class HTTPTests(unittest.TestCase):
         with patch.object(http.time, "monotonic", return_value=10.5), patch.object(http.time, "sleep") as sleep:
             self.client.get_json(self.url)
         sleep.assert_called_once_with(1.0)
+
+    def test_post_json_sends_body_and_skips_cache(self):
+        url = EVIDENCE_ENDPOINTS["SHORT_INTEREST"]
+        self.respond(b'[{"symbolCode":"AAPL"}]')
+        with patch.object(http.time, "sleep"):
+            self.assertEqual(self.client.post_json(url, {"limit": 1}), [{"symbolCode": "AAPL"}])
+        request = self.client.opener.open.call_args.args[0]
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.get_header("Content-type"), "application/json")
+        self.assertEqual(request.data, b'{"limit":1}')
+        self.assertEqual(list(Path(self.temp.name).iterdir()), [])
+
+    def test_post_json_no_content_is_empty_list(self):
+        self.respond(b"", {"Content-Length": "0"}, status=204)
+        with patch.object(http.time, "sleep"):
+            self.assertEqual(self.client.post_json(EVIDENCE_ENDPOINTS["SHORT_INTEREST"], {"limit": 1}), [])
+
+    def test_post_json_rejects_unlisted_host_before_network(self):
+        with self.assertRaises(SourceError):
+            self.client.post_json("https://example.org/data", {"limit": 1})
+        self.client.opener.open.assert_not_called()
+
+    def test_gdelt_minimum_pacing(self):
+        self.url = EVIDENCE_ENDPOINTS["GDELT"] + "?query=x"
+        http._last_request["api.gdeltproject.org"] = 100
+        self.respond(b'{"articles":[]}')
+        with patch.object(http.time, "monotonic", return_value=100.5), \
+                patch.object(http.time, "sleep") as sleep:
+            self.client.get_json(self.url)
+        sleep.assert_called_once_with(5.0)
+
+    def test_throttle_text_is_retried(self):
+        self.url = EVIDENCE_ENDPOINTS["GDELT"] + "?query=x"
+        self.client.opener.open.side_effect = [
+            Response(b"Please limit requests to one every 5 seconds") for _ in range(3)]
+        with patch.object(http.time, "sleep") as sleep:
+            with self.assertRaisesRegex(SourceError, "rate limit"):
+                self.client.get_json(self.url)
+        self.assertEqual(self.client.opener.open.call_count, 3)
+        self.assertGreaterEqual(sleep.call_count, 2)
+
+    def test_redirect_validation_allowlist(self):
+        for key, host in (("OFAC_SDN_CSV", "sanctionslistservice.ofac.treas.gov"),
+                          ("UN_CONSOLIDATED_XML", "scsanctions.un.org"),
+                          ("UK_OFSI_CONLIST_CSV", "ofsistorage.blob.core.windows.net"),
+                          ("EU_CONSOLIDATED_XML", "webgate.ec.europa.eu")):
+            self.assertEqual(http.validate_url(SANCTIONS_ENDPOINTS[key]), host)
+        for base, expected in (
+            (REDIRECT_ENDPOINTS["OFAC_PUBLISHED_S3"],
+             "wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com"),
+            (REDIRECT_ENDPOINTS["UN_PUBLIC_BLOB"],
+             "unsolprodfiles.blob.core.windows.net"),
+        ):
+            self.assertEqual(http.validate_redirect_url(base + "EN/consolidated.xml?sig=1"), expected)
+        for url in ("https://evil.example/Published/x",
+                    "http://wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com/Published/x",
+                    "https://wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com/Other/x",
+                    "https://user@wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com/Published/x"):
+            with self.subTest(url=url), self.assertRaises(SourceError):
+                http.validate_redirect_url(url)
+
+    def test_download_streams_allowlisted_and_enforces_cap(self):
+        opener = Mock()
+        opener.open.return_value = DownloadResponse([b"a,b,c,d\r\n", b"1,2,3,4\r\n"])
+        target = Path(self.temp.name) / "out.csv"
+        with patch.object(http, "build_opener", return_value=opener), \
+                patch.object(http.time, "sleep"):
+            written = self.client.download(SANCTIONS_ENDPOINTS["OFAC_SDN_CSV"], str(target), 1024)
+        self.assertEqual(written, len(b"a,b,c,d\r\n1,2,3,4\r\n"))
+        self.assertEqual(target.read_bytes(), b"a,b,c,d\r\n1,2,3,4\r\n")
+        self.assertTrue(self.client.retrieved_at)
+        self.assertIn("text/csv", opener.open.call_args.args[0].get_header("Accept"))
+        opener.open.return_value = DownloadResponse([b"12345"])
+        with patch.object(http, "build_opener", return_value=opener), \
+                patch.object(http.time, "sleep"), self.assertRaisesRegex(SourceError, "byte limit"):
+            self.client.download(SANCTIONS_ENDPOINTS["OFAC_SDN_CSV"], str(target), 4)
 
     def test_redirect_refused_and_closed(self):
         body = io.BytesIO()
@@ -833,12 +1263,12 @@ class HTTPTests(unittest.TestCase):
         for kwargs in ({"timeout": 0}, {"max_bytes": 0}, {"rate": -1}, {"ttl": float("nan")}):
             with self.subTest(kwargs=kwargs), self.assertRaises(SourceError):
                 http.HTTPClient(**kwargs)
-        with patch.dict(os.environ, {"FINWORLD_RATE_LIMIT": "invalid"}), self.assertRaises(SourceError):
+        with patch.dict(os.environ, {"LELE_RATE_LIMIT": "invalid"}), self.assertRaises(SourceError):
             http.HTTPClient()
-        with patch.dict(os.environ, {"FINWORLD_USER_AGENT": "research-cli/1.0"}):
+        with patch.dict(os.environ, {"LELE_USER_AGENT": "research-cli/1.0"}):
             client = http.HTTPClient(cache_dir=None)
         self.assertEqual(client.user_agent, "research-cli/1.0")
-        with patch.dict(os.environ, {"FINWORLD_USER_AGENT": "bad\nheader"}), self.assertRaises(SourceError):
+        with patch.dict(os.environ, {"LELE_USER_AGENT": "bad\nheader"}), self.assertRaises(SourceError):
             http.HTTPClient()
 
 

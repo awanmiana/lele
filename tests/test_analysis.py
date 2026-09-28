@@ -3,8 +3,8 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-from finworld.analysis import engine
-from finworld.core import registry
+from lele.analysis import engine
+from lele.core import registry
 
 
 class AnalysisTests(unittest.TestCase):
@@ -44,8 +44,12 @@ class AnalysisTests(unittest.TestCase):
             "debt_to_assets": 0.3, "debt_to_equity": 1.5, "net_margin": 0.1,
             "return_on_assets": 0.04, "return_on_equity": 0.2, "cash_to_assets": 0.1,
         })
-        self.assertEqual(group["missing_metrics"], [])
-        self.assertEqual(group["warnings"], [])
+        self.assertEqual(group["missing_metrics"], [
+            "inventory_net", "long_term_debt_current", "long_term_debt_noncurrent",
+            "net_cash_from_financing_activities", "net_cash_from_investing_activities",
+            "net_cash_from_operating_activities", "short_term_borrowings",
+        ])
+        self.assertIn("scope/duration not verified", " ".join(group["warnings"]))
         for indicator in group["indicators"]:
             self.assertEqual(indicator["period"], "2024")
             self.assertEqual(indicator["source"], "annual report")
