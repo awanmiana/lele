@@ -438,3 +438,136 @@ fine, so it is the script-plus-children case rather than pipes in general.
 
 The operational rule follows from the evidence rather than from the mystery:
 redirect to a file and read the file, do not pipe.
+
+## 10. Schema v17 — what a column name claimed, and what a command could never find
+
+Three defects, all of the same species: a name or a query that asserted more than
+the code behind it supported. Found while adding the volatility layer.
+
+### A misnamed column, and a field that was never volatility
+
+`move_events.realized_volatility_percent` held `(high - low) / low * 100` for the
+**terminal bar of the move**. That is a bar's range as a percent of its low. It is
+not a volatility estimate, it was never one, and the column name claimed a quantity
+the computation did not produce — in a table called `move_events`, in a tool whose
+whole subject is measurement.
+
+Renamed to `terminal_bar_range_percent`. The value was correct under the correct
+name, so the migration **carries it across unchanged** rather than recomputing, and
+records the rename in each row's `evidence` plus a note in `meta.migration_notes`.
+A column rename that leaves no trace is indistinguishable from a recompute, and
+`tests/test_instruments.py` asserts the carried value and the note. Adding a real
+estimator beside a field that lied about what it held would have been worse than
+having neither.
+
+### `rag detect-anomalies` could only ever return zero
+
+`rag.detect_price_anomalies` queried `observations WHERE source = 'price'`. **No
+fetcher in this project has ever written such a row.** The query could not match,
+so the command reported zero anomalies from a data set that did not exist. Its test
+passed, because the test *manufactured* `source='price'` rows by hand — it pinned the
+implementation instead of the behaviour, which is the failure mode a test written
+alongside the code rather than against it invites.
+
+It had two further problems, both of which would have survived being merely wired
+up: it z-scored **price levels**, which is not a statement about unusual movement
+because prices are not stationary, so a rising asset is "anomalous" forever; and it
+built its baseline from the **same window it was judging**, which deflates the
+spread and compresses the score toward zero.
+
+Rewritten to read `price_bars`, to compare **returns over a window**, and to build
+the baseline from moves strictly **before** the window. The instrument list now comes
+from `price_bars` rather than from the column nothing wrote. This also gives
+`price_anomalies` its only writer, which matters beyond the command: `rag
+event_indicator_v1` weighted an anomaly component that was structurally always zero,
+so its composite score silently covered two thirds of what it claimed.
+
+### `causes.scan` raised on entry and had no caller
+
+`causes.py` passed `medium_percent` where `moves.validate` expects a *sequence* of
+thresholds, so every argument after `move_hours` landed in the wrong slot and the
+function could only ever raise `ValueError`. It had no caller and no test, so
+nothing noticed. Corrected, and given three tests; the first was confirmed to fail
+against the pre-fix code.
+
+### Two defects the new code introduced, caught before merge
+
+Both were found by running the commands rather than by the unit tests, and both are
+now pinned by tests that would have caught them.
+
+- **A `Decimal` in a JSON report.** The new helpers quantized a `Decimal` and
+  returned it. Every unit test compared values in Python and passed; the first
+  `lele volatility` a user ran raised `TypeError: Object of type Decimal is not JSON
+  serializable` from inside the encoder. `tests/test_instruments.py::SerializationTests`
+  now serializes every report variant with `allow_nan=False`.
+- **Text compared against a float.** Severity is derived from a reported percentile,
+  which is text so the report survives `json.dumps`. Comparing that text to `99.5`
+  raised `TypeError` on the first command run against data containing an anomaly.
+
+The general lesson is the one this project keeps relearning: **a test that asserts a
+value is not a test that asserts a contract.** Serializability, precision and
+convention are contracts, and the arithmetic tests alone would not have found either.
+
+### What the volatility layer adds, and what it deliberately does not
+
+Nine realized-volatility estimators, all `Decimal`, each storing the convention that
+produced it. `lpv` is the default because the R² of every range estimator against
+next-period realized volatility is nearly identical (43–46%); the high/low data buys
+calibration, not prediction.
+
+What is **refused rather than approximated**, and why each refusal is the honest
+answer:
+
+| Refused | Because |
+|---|---|
+| a window spanning a missing bar | it covers more elapsed time than it names — the original defect A4, now inherited deliberately |
+| a non-positive Garman-Klass or Rogers-Satchell total | those per-bar terms are signed; clamping to epsilon reports an invented volatility |
+| an all-identical-price window | a zero variance is not a volatility of zero to divide by later |
+| realized kernel, bipower jump detection | both need an intraday grid; on daily bars they are unavailable, not approximable |
+| an annualization with no recorded asset class | a guessed 252 is a plausible-looking wrong number |
+
+Two traps are pinned by tests because they are commonly implemented wrongly:
+**Bollinger uses the population deviation (n), not n−1**, contradicting the
+demeaned close-to-close estimator's n−2, which is why there is one `variance()`
+taking an explicit `ddof` rather than one shared default; and **`natr` is not
+invariant to an additive splice** while absolute `atr` is, which matters for any
+spliced futures or crypto series.
+
+## 11. Allocation frameworks, recorded as citations and not as advice
+
+The question "how would a trader or a multi-millionaire trade this asset" has a bad
+answer, and the honest answer is a research finding rather than a recommendation.
+`lele/analysis/framework_notes.py` holds the documented positions, each with a
+primary source, an evidence grade, and **the documented criticism of it** — an entry
+without a counter-result would be marketing.
+
+The excluded list is longer than the included one and is the more useful half: it
+records claims this project declines to assert because no primary source was reached.
+These circulate with citations attached and are therefore the most likely to be
+wrong: the Paul Tudor Jones 1/5/6 rule; "volatility-managed portfolios doubled the
+Sharpe ratio" (the abstract says Sharpe ratios increased — the specific multiple is
+in tables not read); "halving the equity allocation doubles the required return"; the
+Linder/UBS diversification paper; Jay Cooke's private-equity multiples; Bogle's
+Sharpe difference; the Greenwald, Bernhard, Damodaran and magic-formula material;
+and unsourced quotations from Buffett, Munger, Soros, Dalio and Klarman.
+
+Two corrections to the project's own earlier assumptions belong here:
+
+1. **The pattern-day-trader rule no longer exists as recorded.** FINRA Regulatory
+   Notice 26-10 (effective 2026-06-04, underlying SEC order 91 FR 20731) replaced the
+   day-trade count requirements and the $25,000 minimum equity requirement "in their
+   entirety", phasing in intraday margin level standards to 2027-10-20. Nothing in
+   this project hard-codes the old threshold, and the notice is recorded so it is not
+   reintroduced.
+2. **Yahoo Finance is not merely "unsupported" — it is explicitly prohibited.** ToS
+   §4 forbids collecting data "using any automated means, devices, programs,
+   algorithms or methodologies ... for any purpose without our express, prior
+   permission", and separately forbids building a competing aggregated data source.
+   The `yfinance` documentation itself says the API is "intended for personal use
+   only", which is a disclaimer of liability rather than a grant of permission. The
+   earlier audit entry understated this.
+
+Neither correction changes what this project does; both change how firmly it can say
+why. The 0.9 five-minute objective stays exactly where it was, recorded as an
+aspiration rather than a gate: a target that cannot be met provides no gradient and
+is precisely the kind of constant that gets quietly lowered.

@@ -3,9 +3,10 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, UTC
+from decimal import Decimal
 from pathlib import Path
 
-from lele.core import registry
+from lele.core import clock, registry
 from lele.analysis import rag
 
 
@@ -80,47 +81,121 @@ class RagTests(unittest.TestCase):
         rels = self.conn.execute("SELECT * FROM event_relationships").fetchall()
         self.assertGreater(len(rels), 0)
 
-    def test_detect_price_anomalies(self):
-        self.conn.executescript("""
-            CREATE TABLE IF NOT EXISTS observations(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source TEXT NOT NULL CHECK(length(trim(source)) > 0),
-                external_id TEXT NOT NULL CHECK(length(trim(external_id)) > 0),
-                kind TEXT NOT NULL CHECK(length(trim(kind)) > 0),
-                description TEXT NOT NULL DEFAULT '',
-                actor_key TEXT NOT NULL DEFAULT '',
-                counterparty_key TEXT NOT NULL DEFAULT '',
-                instrument_key TEXT NOT NULL DEFAULT '',
-                action TEXT NOT NULL DEFAULT '',
-                reason TEXT NOT NULL DEFAULT '',
-                reason_basis TEXT NOT NULL DEFAULT 'unknown',
-                amount TEXT,
-                unit TEXT NOT NULL DEFAULT '',
-                currency TEXT NOT NULL DEFAULT '',
-                basis TEXT NOT NULL DEFAULT 'observed',
-                occurred_at TEXT NOT NULL DEFAULT '',
-                observed_at TEXT NOT NULL DEFAULT '',
-                available_at TEXT NOT NULL DEFAULT '',
-                source_url TEXT NOT NULL DEFAULT '',
-                evidence TEXT NOT NULL DEFAULT '',
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(source, external_id));
-            CREATE INDEX IF NOT EXISTS idx_observations_instrument
-                ON observations(instrument_key, observed_at);
-        """)
-        self.conn.commit()
-        for i in range(10):
-            price = 100.0 + (i * 0.5)
-            self.conn.execute(
-                """INSERT INTO observations(source, external_id, kind, instrument_key,
-                    observed_at, evidence) VALUES(?,?,?,?,?,?)""",
-                ("price", f"obs-{i}", "price_series", "TEST-USD",
-                 f"2026-09-{i+1:02d}T10:00:00+00:00",
-                 json.dumps({"value": price})),
-            )
-        self.conn.commit()
-        anomalies = rag.detect_price_anomalies(self.conn, "TEST-USD", threshold_sigma=0.5)
-        self.assertGreater(len(anomalies), 0)
+    def bars(self, closes, instrument_key="binance:BTCUSDT", interval_seconds=86400,
+             start="2026-01-01T00:00:00+00:00"):
+        first = datetime.fromisoformat(start)
+        for index, close in enumerate(closes):
+            open_time = first.timestamp() + index * interval_seconds
+            stamp = datetime.fromtimestamp(open_time, UTC).isoformat()
+            registry.add_price_bar(
+                self.conn, instrument_key=instrument_key, interval_seconds=interval_seconds,
+                open_time=stamp, close_time=datetime.fromtimestamp(
+                    open_time + interval_seconds, UTC).isoformat(),
+                open=str(close), high=str(close * 1.01), low=str(close * 0.99),
+                close=str(close), volume="1", source="test",
+                retrieved_at="2026-02-01T00:00:00+00:00")
+
+    def test_a_window_unusual_for_the_instrument_is_flagged(self):
+        """A calm series with one large move must produce exactly that one anomaly.
+
+        The previous version of this test manufactured `observations` rows with
+        `source='price'`, which no fetcher has ever written, so it passed while the
+        command itself could only ever report zero.
+        """
+        quiet = [100 + (index % 3) for index in range(120)]
+        self.bars(quiet + [100, 100, 100, 140])
+        report = rag.detect_price_anomalies(
+            self.conn, "binance:BTCUSDT", 86400, mode="percentile", level="95",
+            window_bars=4, baseline_bars=100, store=False)
+        self.assertEqual(report["status"], "ok")
+        self.assertGreater(len(report["anomalies"]), 0)
+        flagged = report["anomalies"][-1]
+        self.assertEqual(flagged["direction"], "up")
+        self.assertEqual(flagged["anomaly_type"], "price_move")
+        self.assertFalse(flagged["stored"])
+
+    def test_the_anomaly_is_written_so_the_indicator_can_see_it(self):
+        """The table had no writer at all, so `event_indicator_v1`'s anomaly
+        component was structurally always zero.
+
+        The clock is pinned rather than relying on fixture dates landing inside a
+        30-day window: a test that depends on today's date is a test that fails on
+        a day nobody changed anything.
+        """
+        quiet = [100 + (index % 3) for index in range(120)]
+        self.bars(quiet + [100, 100, 100, 140])
+        report = rag.detect_price_anomalies(
+            self.conn, "binance:BTCUSDT", 86400, window_bars=4, baseline_bars=100)
+        self.assertTrue(any(row["stored"] for row in report["anomalies"]))
+        with clock.freeze("2026-05-10T00:00:00+00:00"):
+            indicator = rag.event_indicator_v1(self.conn, "binance:BTCUSDT")
+        self.assertGreater(indicator["anomaly_count"], 0)
+
+    def test_no_bars_reports_insufficient_rather_than_zero_anomalies(self):
+        """Zero anomalies and no data must not look the same."""
+        report = rag.detect_price_anomalies(
+            self.conn, "binance:BTCUSDT", 86400, window_bars=4, baseline_bars=100)
+        self.assertEqual(report["status"], "insufficient_bars")
+        self.assertEqual(report["anomalies"], [])
+        self.assertIn("insufficient_bars", report["skipped_reasons"])
+
+    def test_a_gap_in_the_window_is_skipped_not_judged(self):
+        closes = [100 + (index % 3) for index in range(120)]
+        self.bars(closes)
+        report = rag.detect_price_anomalies(
+            self.conn, "binance:BTCUSDT", 86400, window_bars=4, baseline_bars=100)
+        self.assertEqual(report["coverage"]["gaps"], 0)
+        self.assertGreater(report["windows_examined"], 0)
+
+    def test_bad_rule_parameters_are_refused(self):
+        with self.assertRaises(ValueError):
+            rag.detect_price_anomalies(self.conn, "k", 86400, mode="percentile", level="100")
+        with self.assertRaises(ValueError):
+            rag.detect_price_anomalies(self.conn, "k", 86400, window_bars=1)
+        with self.assertRaises(ValueError):
+            rag.detect_price_anomalies(self.conn, "k", 86400, baseline_bars=0)
+
+    def test_anomaly_reports_survive_json_dumps(self):
+        """Severity is derived from a reported percentile, which is text.
+
+        Comparing that text against a float raised `TypeError` deep inside the
+        first command a user ran with a real anomaly in the data. Only serializing
+        the finished report catches it.
+        """
+        quiet = [100 + (index % 3) for index in range(120)]
+        self.bars(quiet + [100, 100, 100, 140])
+        report = rag.detect_price_anomalies(
+            self.conn, "binance:BTCUSDT", 86400, mode="percentile", level="95",
+            window_bars=4, baseline_bars=100)
+        json.dumps(report, allow_nan=False)
+        for row in report["anomalies"]:
+            with self.subTest(observed_at=row["observed_at"]):
+                self.assertIn(row["severity"],
+                              ("low", "moderate", "high", "critical", "unknown"))
+                json.dumps(row, allow_nan=False)
+
+    def test_severity_comes_from_the_percentile_observed_not_the_level_asked_for(self):
+        """A permissive 95th-percentile rule must not manufacture critical alarms."""
+        self.assertEqual(rag._severity("99.9", True), "critical")
+        self.assertEqual(rag._severity("99.1", True), "high")
+        self.assertEqual(rag._severity("96", True), "moderate")
+        self.assertEqual(rag._severity("95.5", True), "moderate")
+        self.assertEqual(rag._severity("", True), "unknown")
+        self.assertEqual(rag._severity(None, True), "unknown")
+        self.assertEqual(rag._severity("99.9", False), "unknown")
+
+    def test_a_percentile_that_is_not_a_number_is_unknown_not_a_crash(self):
+        self.assertIsNone(rag._percentile_number("not a number"))
+        self.assertIsNone(rag._percentile_number(""))
+        self.assertIsNone(rag._percentile_number(None))
+        self.assertEqual(rag._percentile_number("99.5"), Decimal("99.5"))
+
+    def test_scan_without_an_instrument_key_reads_stored_bars(self):
+        quiet = [100 + (index % 3) for index in range(120)]
+        self.bars(quiet + [100, 100, 100, 140])
+        result = rag.detect_anomalies(self.conn, window_bars=4, baseline_bars=100, store=False)
+        self.assertEqual(result["scanned"], 1)
+        self.assertGreater(result["anomalies"], 0)
 
     def test_event_indicator_v1(self):
         rag.store_events(self.conn, [{

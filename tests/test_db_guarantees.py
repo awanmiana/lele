@@ -172,6 +172,7 @@ class ReadDoesNotWrite(RegistryCase):
                          "--to", "2026-01-08T00:00:00+00:00"], True),
             "store-evidence": (["1", "binance-futures", "BTCUSDT"], False),
             "prospective": (["score", "--ledger", "l.jsonl"], True),
+            "volatility": (["1"], False),
         }
         for command, (extra, expected) in matrix.items():
             with self.subTest(command=command):
@@ -198,16 +199,21 @@ class ReadDoesNotWrite(RegistryCase):
             (("rag", "build-graph", []), True),
             (("rag", "store-events", ["events.json"]), False),
             (("rag", "indicator", ["--instrument-key", "binance:BTCUSDT"]), True),
+            (("instruments", "list", []), True),
+            (("instruments", "show", ["1"]), True),
+            (("instruments", "add", ["1", "--symbol", "BTCUSDT",
+                                     "--asset-class", "bitcoin"]), False),
         ]
         for (command, action, extra), expected in actions:
             with self.subTest(command=command, action=action):
                 args = parser.parse_args([command, action, *extra])
                 self.assertEqual(_read_only(command, args), expected)
         covered = set(matrix) | {entry[0][0] for entry in actions}
-        # These three never open the registry at all, so there is nothing to
-        # classify. `menu` recurses into `main`, so every command it runs is
+        # These never open the registry at all, so there is nothing to classify.
+        # `framework` reads a module constant and returns before any connection is
+        # opened. `menu` recurses into `main`, so every command it runs is
         # classified on its own behalf.
-        no_registry = {"version", "menu", "help"}
+        no_registry = {"version", "menu", "help", "framework"}
         self.assertEqual(READ_ONLY_COMMANDS - covered, set(),
                          "every read-only command must be reachable from this test")
         self.assertEqual(set(COMMANDS) - covered - no_registry, set(),

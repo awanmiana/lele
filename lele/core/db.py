@@ -23,6 +23,7 @@ Three properties matter here and all three used to be wrong.
 import hashlib
 import os
 import platform
+import json
 import sqlite3
 import sys
 import tempfile
@@ -246,7 +247,8 @@ def _orphan_report(conn: sqlite3.Connection) -> list[dict]:
     """
     reports = []
     for table in ("attributes", "edges", "edge_retry", "metrics", "signals", "filings",
-                  "entity_links", "entity_aliases", "sanctions_links", "money_flows"):
+                  "entity_links", "entity_aliases", "sanctions_links", "money_flows",
+                  "instruments"):
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?"
                             " AND sql LIKE '%REFERENCES%'", (table,)).fetchone():
             continue
@@ -272,6 +274,75 @@ def _migrate_move_causes(conn: sqlite3.Connection) -> None:
            FROM move_causes WHERE role='move'""")
     conn.execute("DROP TABLE move_causes")
     conn.execute(f"ALTER TABLE {temporary} RENAME TO move_causes")
+
+
+def _migrate_move_events_range_column(conn: sqlite3.Connection) -> None:
+    """Rename the misnamed terminal-bar range column and record the rename.
+
+    The column held `(high - low) / low * 100` for the terminal bar of the move,
+    which is not a volatility estimate. It was stored as
+    `realized_volatility_percent`, so every stored move carried a number whose
+    name claimed more than the computation supported. The value was correct
+    under the correct name, so it is carried across unchanged; the rename is
+    appended to each row's evidence rather than applied silently, because a
+    column rename that leaves no trace is indistinguishable from a recompute.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(move_events)")}
+    if not columns or "realized_volatility_percent" not in columns:
+        return
+    temporary = "_registry_migrate_move_events"
+    conn.execute(table_definition("move_events").replace(
+        "move_events(", f"{temporary}(", 1))
+    conn.execute(
+        f"""INSERT INTO {temporary}(
+             id, instrument_key, interval_seconds, move_hours, tier, threshold_percent,
+             direction, start_time, end_time, start_price, end_price, change_percent,
+             terminal_bar_range_percent, baseline_mean_percent, baseline_std_percent,
+             z_score, baseline_percentile, baseline_bars, detected_at, available_at,
+             source_url, evidence)
+           SELECT id, instrument_key, interval_seconds, move_hours, tier, threshold_percent,
+             direction, start_time, end_time, start_price, end_price, change_percent,
+             realized_volatility_percent, baseline_mean_percent, baseline_std_percent,
+             z_score, baseline_percentile, baseline_bars, detected_at, available_at,
+             source_url, evidence FROM move_events""")
+    for row in conn.execute(
+        f"""SELECT id, evidence FROM {temporary}"""
+    ).fetchall():
+        note = {"column_renamed_from": "realized_volatility_percent",
+                "renamed_at_schema_version": SCHEMA_VERSION,
+                "meaning": "the high-low range of the terminal bar as a percent of its low"}
+        try:
+            evidence = json.loads(row["evidence"]) if row["evidence"] else {}
+            if not isinstance(evidence, dict):
+                evidence = {}
+        except (TypeError, ValueError):
+            evidence = {}
+        evidence.update(note)
+        conn.execute(
+            f"""UPDATE {temporary} SET evidence=? WHERE id=?""",
+            (json.dumps(evidence, sort_keys=True), row["id"]))
+    carried = conn.execute(f"SELECT count(1) FROM {temporary}").fetchone()[0]
+    conn.execute("DROP TABLE move_events")
+    conn.execute(f"ALTER TABLE {temporary} RENAME TO move_events")
+    if carried:
+        _migration_note(conn, f"renamed move_events.realized_volatility_percent to "
+                              f"terminal_bar_range_percent on {carried} stored move(s)")
+
+
+def _migration_note(conn: sqlite3.Connection, text: str) -> None:
+    """Record what a migration did, so a silent rewrite cannot pass for a no-op."""
+    row = conn.execute("SELECT v FROM meta WHERE k='migration_notes'").fetchone()
+    try:
+        notes = json.loads(row[0]) if row and row[0] else []
+        if not isinstance(notes, list):
+            notes = []
+    except (TypeError, ValueError):
+        notes = []
+    notes.append({"at_version": SCHEMA_VERSION, "detail": text})
+    conn.execute(
+        "INSERT INTO meta(k, v) VALUES('migration_notes', ?)"
+        " ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        (json.dumps(notes, sort_keys=True),))
 
 
 def _rebuild_with_foreign_keys(conn: sqlite3.Connection, table: str) -> None:
@@ -333,19 +404,23 @@ def initialize(conn: sqlite3.Connection) -> bool:
             conn.execute("DROP TABLE move_causes")
             conn.execute("DROP TABLE move_events")
         _migrate_move_causes(conn)
+        _migrate_move_events_range_column(conn)
         for statement in statements():
             conn.execute(statement)
         for values in preserved_events:
             values["tier"] = _move_tier(int(values["threshold_percent"]))
+            if "realized_volatility_percent" in values:
+                values["terminal_bar_range_percent"] = values.pop(
+                    "realized_volatility_percent")
             conn.execute(
                 """INSERT INTO move_events(id, instrument_key, interval_seconds, move_hours,
                      tier, threshold_percent, direction, start_time, end_time, start_price,
-                     end_price, change_percent, realized_volatility_percent,
+                     end_price, change_percent, terminal_bar_range_percent,
                      baseline_mean_percent, baseline_std_percent, z_score, baseline_percentile,
                      baseline_bars, detected_at, available_at, source_url, evidence)
                    VALUES(:id, :instrument_key, :interval_seconds, :move_hours, :tier,
                      :threshold_percent, :direction, :start_time, :end_time, :start_price,
-                     :end_price, :change_percent, :realized_volatility_percent,
+                     :end_price, :change_percent, :terminal_bar_range_percent,
                      :baseline_mean_percent, :baseline_std_percent, :z_score,
                      :baseline_percentile, :baseline_bars, :detected_at, :available_at,
                      :source_url, :evidence)""", values)
@@ -381,6 +456,10 @@ def initialize(conn: sqlite3.Connection) -> bool:
         ):
             if column not in run_columns:
                 conn.execute(f"ALTER TABLE ingest_runs ADD COLUMN {column} {definition}")
+        bar_columns = {row[1] for row in conn.execute("PRAGMA table_info(price_bars)")}
+        for column, definition in (("open_interest", "TEXT NOT NULL DEFAULT ''"),):
+            if column not in bar_columns:
+                conn.execute(f"ALTER TABLE price_bars ADD COLUMN {column} {definition}")
         for table in ("attributes", "edges", "metrics", "signals", "filings"):
             if not conn.execute(f"PRAGMA foreign_key_list({table})").fetchall():
                 _rebuild_with_foreign_keys(conn, table)

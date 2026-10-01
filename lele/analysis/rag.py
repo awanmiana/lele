@@ -4,12 +4,13 @@ Provides:
 - store_events: persist political/regulatory/market events into event_store
 - build_event_graph: create event_relationships between correlated events
 - attribute_money_flows: link money flows to causal events
-- detect_price_anomalies: identify price volatility anomalies
+- detect_price_anomalies: flag windows whose move is unusual for that instrument
 - event_indicator_v1: composite indicator combining event, flow, and anomaly signals
 """
 import json
 import sqlite3
 from ..core import clock
+from . import volatility
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -218,84 +219,213 @@ def _hours_diff(iso_a, iso_b):
     return abs((dt_a - dt_b).total_seconds() / 3600)
 
 
-def detect_price_anomalies(conn, instrument_key, anomaly_type="volatility_spike",
-                            lookback_days=30, threshold_sigma=2.0):
-    """Detect price volatility anomalies. Returns list of anomaly dicts."""
-    start = (clock.now() - timedelta(days=lookback_days)).date().isoformat()
-    end = clock.now().date().isoformat() + "T23:59:59+00:00"
+def detect_price_anomalies(conn, instrument_key, interval_seconds, *, mode="percentile",
+                           level="95", window_bars=24, baseline_bars=120, store=True):
+    """Scan stored bars for windows whose move is unusual against this instrument.
 
-    observations = conn.execute(
-        """SELECT o.id, o.instrument_key, o.observed_at, o.evidence
-           FROM observations o
-           WHERE o.instrument_key = ? AND o.source = 'price'
-           AND o.observed_at >= ? AND o.observed_at <= ?
-           ORDER BY o.observed_at""",
-        (instrument_key, start, end),
-    ).fetchall()
+    This used to read `observations` rows whose `source` was `'price'`. No fetcher
+    has ever written one, so the function could only ever return an empty list and
+    `rag detect-anomalies` always reported zero anomalies -- a confident answer
+    from a query that could not match. It now reads `price_bars`, which is where
+    prices actually live.
 
-    if len(observations) < 5:
-        return []
+    Two properties the old version got wrong and this one does not:
 
-    values = []
-    for obs in observations:
-        try:
-            evidence = json.loads(obs["evidence"]) if obs["evidence"] else {}
-            val = float(evidence.get("value", 0))
-            values.append((obs["id"], obs["observed_at"], val))
-        except (json.JSONDecodeError, TypeError, ValueError):
+    * The baseline excludes the window being judged. Scoring an observation against
+      a mean and spread that contain it deflates the spread and compresses the
+      score toward zero, so a threshold quietly stops firing.
+    * Prices are compared as *returns* over a window, not as levels. A z-score of
+      a price level is not a statement about unusual movement; prices are not
+      stationary, so a rising asset is "anomalous" forever.
+    """
+    volatility.validate_threshold(mode, level)
+    if type(window_bars) is not int or not volatility.MIN_WINDOW_BARS <= window_bars <= 2000:
+        raise ValueError(f"window bars must be an integer from {volatility.MIN_WINDOW_BARS} "
+                         "to 2000")
+    if type(baseline_bars) is not int or not 1 <= baseline_bars <= 10000:
+        raise ValueError("baseline bars must be an integer from 1 to 10000")
+    bars = volatility.series(conn, instrument_key, interval_seconds)
+    closes = bars["closes"]
+    total = len(closes)
+    result = {
+        "instrument_key": instrument_key,
+        "interval_seconds": interval_seconds,
+        "parameters": {"mode": mode, "level": level, "window_bars": window_bars,
+                       "baseline_bars": baseline_bars},
+        "bars_available": total,
+        "windows_examined": 0,
+        "windows_skipped": 0,
+        "anomalies": [],
+        "anomaly_type": "price_move",
+        "coverage": {
+            "cadence_seconds": bars["cadence_seconds"],
+            "gaps": len(bars["gaps"]),
+            "first_bar": bars["times"][0] if bars["times"] else None,
+            "last_bar": bars["times"][-1] if bars["times"] else None,
+            "completeness": volatility.UNKNOWN,
+        },
+    }
+    needed = window_bars + baseline_bars
+    if total < needed:
+        result["status"] = "insufficient_bars"
+        result["reason"] = (f"{needed} bars are needed for a {window_bars} bar window judged "
+                            f"against a {baseline_bars} bar baseline, and {total} are stored")
+        result["skipped_reasons"] = {"insufficient_bars": result["reason"]}
+        return result
+    result["status"] = "ok"
+    opens, highs, lows = bars["opens"], bars["highs"], bars["lows"]
+    skipped: dict[str, int] = {}
+    start = window_bars
+    while start + window_bars <= total:
+        end = start + window_bars
+        result["windows_examined"] += 1
+        if any(index in bars["gaps"] for index in range(start + 1, end)):
+            skipped["window_spans_gap"] = skipped.get("window_spans_gap", 0) + 1
+            result["windows_skipped"] += 1
+            start += 1
             continue
-
-    if len(values) < 5:
-        return []
-
-    price_vals = [v[2] for v in values]
-    mean = sum(price_vals) / len(price_vals)
-    variance = sum((x - mean) ** 2 for x in price_vals) / len(price_vals)
-    std = variance ** 0.5
-    if std == 0:
-        return []
-
-    anomalies = []
-    for _obs_id, observed_at, val in values:
-        z_score = (val - mean) / std
-        if abs(z_score) >= threshold_sigma:
-            severity = "critical" if abs(z_score) >= 3 * threshold_sigma else "high" if abs(z_score) >= 2.5 * threshold_sigma else "moderate"
-            anomaly = {
-                "instrument_key": instrument_key,
-                "anomaly_type": anomaly_type,
-                "observed_at": observed_at,
-                "severity": severity,
-                "score": round(abs(z_score), 4),
-                "description": f"Price {val} is {z_score:.2f} sigma from mean {mean:.2f}",
-            }
-            try:
-                inserted = conn.execute(
-                    """INSERT OR IGNORE INTO price_anomalies(
-                         instrument_key, anomaly_type, observed_at, occurred_at,
-                         severity, score, description, evidence, source_url)
-                       VALUES(?,?,?,?,?,?,?,?,?)""",
-                    (instrument_key, anomaly_type, observed_at, observed_at,
-                     severity, abs(z_score), anomaly["description"],
-                     json.dumps({"z_score": z_score, "value": val}, separators=(",", ":")), ""),
-                )
-                if inserted.rowcount > 0:
-                    anomalies.append(anomaly)
-            except sqlite3.IntegrityError:
-                continue
-    return anomalies
+        change = volatility.percent_change(opens, highs, lows, closes, start, end - 1)
+        if change is None:
+            skipped["unusable_window"] = skipped.get("unusable_window", 0) + 1
+            result["windows_skipped"] += 1
+            start += 1
+            continue
+        baseline: list[Decimal] = []
+        cursor = start
+        while cursor > 0 and len(baseline) < baseline_bars:
+            cursor -= 1
+            value = volatility.percent_change(opens, highs, lows, closes,
+                                              max(0, cursor - window_bars), cursor)
+            if value is not None:
+                baseline.append(value)
+        verdict = volatility.evaluate_threshold(baseline, change, mode=mode, level=level)
+        if verdict["breached"] is None:
+            skipped["baseline_too_short"] = skipped.get("baseline_too_short", 0) + 1
+        elif verdict["breached"]:
+            record = _record_anomaly(
+                conn, instrument_key=instrument_key, interval_seconds=interval_seconds,
+                observed_at=bars["times"][end - 1], direction="up" if change > 0 else "down",
+                change=change, verdict=verdict, window_bars=window_bars,
+                window_start=bars["times"][start], store=store)
+            result["anomalies"].append(record)
+        start += 1
+    if skipped:
+        result["skipped_reasons"] = dict(sorted(skipped.items()))
+    return result
 
 
-def detect_anomalies(conn, anomaly_type="volatility_spike", lookback_days=30,
-                     threshold_sigma=2.0):
-    """Detect price anomalies across all instruments. Returns count of anomalies found."""
-    instruments = conn.execute(
-        "SELECT DISTINCT instrument_key FROM observations WHERE source = 'price' AND instrument_key != ''",
-    ).fetchall()
+def _percentile_number(score):
+    """The percentile as a Decimal, from either text or a number.
+
+    Reported values are text so the report survives `json.dumps`, so anything that
+    compares against one has to parse it back rather than assume a float.
+    """
+    if score is None or score == "":
+        return None
+    try:
+        value = Decimal(str(score))
+    except InvalidOperation:
+        return None
+    return value if value.is_finite() else None
+
+
+def _severity(score, breached: bool) -> str:
+    """Severity from the percentile actually observed, not from the level asked for.
+
+    A window that clears a 95th-percentile rule is 'moderate' even when 95 is a
+    very low threshold, and 'critical' when it is beyond the 99.5th. Severity that
+    tracked the configured level instead would make a permissive rule look alarming.
+    """
+    value = _percentile_number(score)
+    if not breached or value is None:
+        return "unknown"
+    if value >= Decimal("99.5"):
+        return "critical"
+    if value >= Decimal("99"):
+        return "high"
+    if value >= Decimal("95"):
+        return "moderate"
+    return "low"
+
+
+def _record_anomaly(conn, *, instrument_key, interval_seconds, observed_at, direction,
+                    change, verdict, window_bars, window_start, store):
+    score = verdict.get("baseline_percentile")
+    record = {
+        "instrument_key": instrument_key,
+        "interval_seconds": interval_seconds,
+        "anomaly_type": "price_move",
+        "observed_at": observed_at,
+        "window_start": window_start,
+        "window_bars": window_bars,
+        "direction": direction,
+        "change_percent": str(verdict["value"]),
+        "severity": _severity(score, bool(verdict["breached"])),
+        "score": str(score) if score is not None else "",
+        "z_score": str(verdict["z_score"]) if verdict["z_score"] is not None else "",
+        "baseline_bars": verdict["baseline_bars"],
+        "baseline_percentile": str(score) if score is not None else "",
+        "rule": {"mode": verdict["mode"], "level": verdict["level"]},
+        "stored": False,
+    }
+    if not store:
+        return record
+    payload = json.dumps({
+        "rule": record["rule"], "direction": direction, "window_bars": window_bars,
+        "window_start": window_start, "baseline_bars": verdict["baseline_bars"],
+        "z_score": record["z_score"], "interval_seconds": interval_seconds,
+        "basis": "threshold rule against this instrument's own trailing distribution",
+        "not_a_cause": True,
+    }, sort_keys=True, separators=(",", ":"))
+    numeric = _percentile_number(score)
+    before = conn.total_changes
+    conn.execute(
+        """INSERT OR IGNORE INTO price_anomalies(
+             instrument_key, anomaly_type, observed_at, occurred_at, severity, score,
+             description, evidence, source_url)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        (instrument_key, "price_move", observed_at, observed_at, record["severity"],
+         float(numeric) if numeric is not None else 0.0,
+         f"{direction} move of {verdict['value']}% over {window_bars} bars, at the "
+         f"{score if score not in (None, '') else 'unranked'}th percentile of its own "
+         f"trailing distribution of {verdict['baseline_bars']} observations",
+         payload, ""))
+    record["stored"] = conn.total_changes > before
+    return record
+
+
+def detect_anomalies(conn, *, interval_seconds=86400, mode="percentile", level="95",
+                     window_bars=24, baseline_bars=120, instrument_key="", store=True):
+    """Scan every instrument that actually has stored bars.
+
+    The instrument list comes from `price_bars` rather than from
+    `observations.source = 'price'`, which nothing has ever written, so the old
+    version had nothing to iterate over and always reported zero.
+    """
+    if instrument_key:
+        keys = [instrument_key]
+    else:
+        rows = conn.execute(
+            """SELECT DISTINCT instrument_key, interval_seconds FROM price_bars
+               WHERE instrument_key != '' ORDER BY instrument_key""").fetchall()
+        keys = [(row["instrument_key"], row["interval_seconds"]) for row in rows]
+    reports = []
     total = 0
-    for inst in instruments:
-        total += len(detect_price_anomalies(conn, inst["instrument_key"], anomaly_type,
-                                             lookback_days, threshold_sigma))
-    return total
+    for entry in keys:
+        if isinstance(entry, tuple):
+            key, interval = entry
+        else:
+            key, interval = entry, interval_seconds
+        report = detect_price_anomalies(
+            conn, key, interval, mode=mode, level=level, window_bars=window_bars,
+            baseline_bars=baseline_bars, store=store)
+        reports.append(report)
+        total += len(report["anomalies"])
+    return {"scanned": len(reports), "anomalies": total, "reports": reports,
+            "parameters": {"interval_seconds": interval_seconds, "mode": mode,
+                           "level": level, "window_bars": window_bars,
+                           "baseline_bars": baseline_bars}}
+
 
 
 def event_indicator_v1(conn, instrument_key=None, limit=20):

@@ -1115,7 +1115,7 @@ def scan(conn, entity_id, instrument_key, interval_seconds, move_hours=24, topic
         raise ValueError(f"pre hours must be an integer from 1 to {PROVIDER_WINDOW_HOURS}")
     if type(articles) is not int or not 1 <= articles <= news.MAX_ARTICLES:
         raise ValueError(f"articles must be an integer from 1 to {news.MAX_ARTICLES}")
-    moves.validate(move_hours, medium_percent, big_percent, baseline_bars, 1, False)
+    moves.validate(move_hours, (medium_percent, big_percent), baseline_bars, 1, False)
     current = moves.current(conn, instrument_key, interval_seconds, move_hours)
     report = {
         "method": METHOD, "as_of": current.get("as_of"),

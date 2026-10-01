@@ -383,9 +383,11 @@ class FullPipelineIntegrationTests(unittest.TestCase):
             attr_result = rag.attribute_money_flows(self.conn, window_hours=48)
             self.assertEqual(attr_result, 0)
 
-            # detect-anomalies (no price observations in DB, should return 0)
-            anomaly_result = rag.detect_anomalies(self.conn, lookback_days=30, threshold_sigma=2.0)
-            self.assertEqual(anomaly_result, 0)
+            # detect-anomalies reads price_bars. This database has none yet, so the
+            # honest answer is "insufficient bars", not "zero anomalies".
+            anomaly_result = rag.detect_anomalies(self.conn, store=False)
+            self.assertEqual(anomaly_result["scanned"], 0)
+            self.assertEqual(anomaly_result["anomalies"], 0)
 
             # indicator (should work with stored events)
             indicator_result = rag.event_indicator_v1(self.conn, limit=20)

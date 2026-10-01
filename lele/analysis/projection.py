@@ -15,7 +15,8 @@ INSTRUMENT_FIELDS = {
     "entity_key": 512, "symbol": 128, "asset_class": 128, "venue": 256,
     "currency": 128, "unit": 128, "price_type": 128, "source_url": 4096,
 }
-ASSET_CLASSES = frozenset({"gold", "oil", "fuel", "bitcoin", "stock"})
+ASSET_CLASSES = frozenset({"bitcoin", "crypto", "gold", "silver", "oil", "fuel", "commodity",
+                          "stock", "etf", "index", "bond", "fx", "volatility"})
 _PRICE_RE = re.compile(r"[+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 _TIMESTAMP_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"

@@ -200,7 +200,7 @@ class ProjectionTests(unittest.TestCase):
             payload = self.payload()
             payload["instrument"]["asset_class"] = asset_class
             self.assertEqual(self.run_payload(payload)["instrument"]["asset_class"], asset_class)
-        for field, value in (("asset_class", "bond"), ("entity_key", "fixture:unknown"),
+        for field, value in (("asset_class", "derivative"), ("entity_key", "fixture:unknown"),
                              ("source_url", "https://localhost/prices"), ("source_url", "not a source")):
             payload = self.payload()
             payload["instrument"][field] = value

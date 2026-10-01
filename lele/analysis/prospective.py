@@ -83,7 +83,8 @@ def _validate_config(value):
                               "required_asset_classes")
     if (not classes or len(set(classes)) != len(classes)
             or any(cls not in projection.ASSET_CLASSES for cls in classes)):
-        raise ValueError("required_asset_classes must be 1..5 unique supported asset classes")
+        raise ValueError(f"required_asset_classes must be 1..{len(projection.ASSET_CLASSES)} unique "
+                         "supported asset classes")
     metric = value["target_metric"]
     if metric not in TARGET_METRICS:
         raise ValueError("config.target_metric is not supported")

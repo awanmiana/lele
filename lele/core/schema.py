@@ -8,7 +8,7 @@ drifting away from it.
 
 import sqlite3
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(
@@ -302,6 +302,25 @@ CREATE TABLE IF NOT EXISTS pattern_matches(
     FOREIGN KEY (historical_volatility_id) REFERENCES volatility_instances(id));
 CREATE INDEX IF NOT EXISTS idx_pattern_current ON pattern_matches(current_volatility_id);
 CREATE INDEX IF NOT EXISTS idx_pattern_historical ON pattern_matches(historical_volatility_id);
+CREATE TABLE IF NOT EXISTS instruments(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    symbol TEXT NOT NULL CHECK(length(trim(symbol)) > 0),
+    venue TEXT NOT NULL DEFAULT '',
+    asset_class TEXT NOT NULL CHECK(length(trim(asset_class)) > 0),
+    quote_currency TEXT NOT NULL DEFAULT '',
+    contract_multiplier TEXT,
+    expiry TEXT,
+    adjustment_basis TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(adjustment_basis IN ('adjusted', 'unadjusted', 'unknown')),
+    rights_basis TEXT NOT NULL DEFAULT 'unknown',
+    rights_verified INTEGER NOT NULL DEFAULT 0 CHECK(rights_verified IN (0, 1)),
+    first_seen_at TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT NOT NULL DEFAULT '',
+    notes TEXT,
+    UNIQUE(symbol, venue, asset_class));
+CREATE INDEX IF NOT EXISTS idx_instruments_entity ON instruments(entity_id);
+CREATE INDEX IF NOT EXISTS idx_instruments_class ON instruments(asset_class);
 CREATE TABLE IF NOT EXISTS price_bars(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     instrument_key TEXT NOT NULL,
@@ -314,6 +333,7 @@ CREATE TABLE IF NOT EXISTS price_bars(
     close TEXT NOT NULL,
     volume TEXT NOT NULL,
     quote_volume TEXT NOT NULL DEFAULT '',
+    open_interest TEXT NOT NULL DEFAULT '',
     trades INTEGER NOT NULL DEFAULT 0,
     source TEXT NOT NULL,
     source_url TEXT,
@@ -321,6 +341,29 @@ CREATE TABLE IF NOT EXISTS price_bars(
     evidence TEXT,
     UNIQUE(instrument_key, interval_seconds, open_time));
 CREATE INDEX IF NOT EXISTS idx_price_bars_series ON price_bars(instrument_key, interval_seconds, open_time);
+CREATE TABLE IF NOT EXISTS volatility_estimates(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument_key TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL CHECK(interval_seconds >= 60),
+    estimator TEXT NOT NULL,
+    window_bars INTEGER NOT NULL CHECK(window_bars >= 2),
+    as_of TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    volatility_percent TEXT NOT NULL,
+    annualized_percent TEXT NOT NULL,
+    variance TEXT NOT NULL,
+    basis TEXT NOT NULL DEFAULT 'per_bar',
+    annualization TEXT NOT NULL DEFAULT '',
+    ddof INTEGER NOT NULL DEFAULT 0,
+    convention TEXT NOT NULL DEFAULT '{}',
+    baseline_bars INTEGER NOT NULL DEFAULT 0,
+    observed_at TEXT NOT NULL,
+    available_at TEXT NOT NULL,
+    source_url TEXT,
+    evidence TEXT,
+    UNIQUE(instrument_key, interval_seconds, estimator, window_bars, as_of));
+CREATE INDEX IF NOT EXISTS idx_volatility_estimates_series
+    ON volatility_estimates(instrument_key, interval_seconds, estimator, as_of);
 CREATE TABLE IF NOT EXISTS move_events(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     instrument_key TEXT NOT NULL,
@@ -334,7 +377,7 @@ CREATE TABLE IF NOT EXISTS move_events(
     start_price TEXT NOT NULL,
     end_price TEXT NOT NULL,
     change_percent TEXT NOT NULL,
-    realized_volatility_percent TEXT NOT NULL,
+    terminal_bar_range_percent TEXT NOT NULL,
     baseline_mean_percent TEXT NOT NULL,
     baseline_std_percent TEXT NOT NULL,
     z_score TEXT NOT NULL,
@@ -404,9 +447,9 @@ def table_definition(name: str) -> str:
     raise KeyError(name)
 
 
-EXPECTED_TABLES = frozenset(['attributes', 'cause_scans', 'edge_retry', 'edges', 'entities', 'entity_aliases', 'entity_links', 'event_relationships', 'event_store', 'event_volatility_links', 'filings', 'ingest_runs', 'meta', 'metrics', 'money_flow_attribution', 'money_flows', 'move_causes', 'move_events', 'observations', 'pattern_matches', 'price_anomalies', 'price_bars', 'sanctions_links', 'sanctions_listings', 'semantic_embeddings', 'signals', 'volatility_instances'])
+EXPECTED_TABLES = frozenset(['attributes', 'cause_scans', 'edge_retry', 'edges', 'entities', 'entity_aliases', 'entity_links', 'event_relationships', 'event_store', 'event_volatility_links', 'filings', 'ingest_runs', 'instruments', 'meta', 'metrics', 'money_flow_attribution', 'money_flows', 'move_causes', 'move_events', 'observations', 'pattern_matches', 'price_anomalies', 'price_bars', 'sanctions_links', 'sanctions_listings', 'semantic_embeddings', 'signals', 'volatility_estimates', 'volatility_instances'])
 
-EXPECTED_INDEXES = frozenset(['idx_aliases_canonical', 'idx_cause_scans_series', 'idx_embeddings_entity', 'idx_embeddings_kind', 'idx_event_rel_source', 'idx_event_rel_target', 'idx_event_store_actor', 'idx_event_store_instrument', 'idx_event_store_type', 'idx_event_vol_event', 'idx_event_vol_volatility', 'idx_flows_dst', 'idx_flows_src', 'idx_links_entity', 'idx_money_attrib_event', 'idx_money_attrib_flow', 'idx_move_causes_category', 'idx_move_causes_control', 'idx_move_causes_window', 'idx_move_events_series', 'idx_move_events_tier', 'idx_observations_actor', 'idx_observations_instrument', 'idx_pattern_current', 'idx_pattern_historical', 'idx_price_anomaly_instrument', 'idx_price_bars_series', 'idx_signals_ent', 'idx_volatility_instrument', 'idx_volatility_magnitude'])
+EXPECTED_INDEXES = frozenset(['idx_aliases_canonical', 'idx_cause_scans_series', 'idx_embeddings_entity', 'idx_embeddings_kind', 'idx_event_rel_source', 'idx_event_rel_target', 'idx_event_store_actor', 'idx_event_store_instrument', 'idx_event_store_type', 'idx_event_vol_event', 'idx_event_vol_volatility', 'idx_flows_dst', 'idx_flows_src', 'idx_instruments_class', 'idx_instruments_entity', 'idx_links_entity', 'idx_money_attrib_event', 'idx_money_attrib_flow', 'idx_move_causes_category', 'idx_move_causes_control', 'idx_move_causes_window', 'idx_move_events_series', 'idx_move_events_tier', 'idx_observations_actor', 'idx_observations_instrument', 'idx_pattern_current', 'idx_pattern_historical', 'idx_price_anomaly_instrument', 'idx_price_bars_series', 'idx_signals_ent', 'idx_volatility_estimates_series', 'idx_volatility_instrument', 'idx_volatility_magnitude'])
 
 
 def inventory(conn: sqlite3.Connection) -> tuple[set, set]:

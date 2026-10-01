@@ -27,6 +27,18 @@ changed.** The findings that matter for planning:
   defect-oriented rule set, `mypy` clean with full annotations required on the
   foundation modules.
 
+**The volatility layer and the instrument inventory are now built (schema v17).**
+Delivered this round: an `instruments` table so a symbol, venue, quote currency,
+adjustment basis and contract identity are queryable instead of buried in an
+`evidence` blob; nine realized-volatility estimators in `analysis/volatility.py`,
+all `Decimal`, each storing the convention that produced it; a three-mode threshold
+rule (`percentile` primary, `z_score` secondary, `absolute` for genuinely
+comparable levels) whose baseline excludes the window it judges; `lele
+instruments`, `lele volatility` and `lele framework`; and a rewritten `rag
+detect-anomalies` that reads `price_bars` instead of a column nothing had ever
+written. Recorded in `AUDIT.md` §10–§11, including the three defects it closed and
+the two it introduced.
+
 **The next queue, in order.**
 
 1. **Re-establish the M04/M05 enrichment results on the corrected detector.** The
@@ -42,7 +54,23 @@ changed.** The findings that matter for planning:
 4. **Finish the type annotations.** The gate prevents the debt growing in the
    foundation; it does not repay it in the historical modules. 542 functions
    still carry no annotation and their bodies are the only thing checked.
-5. **The rest of the standing queue below**, unchanged: P09 prospective
+5. **Keyless non-Binance price ingestion.** Still open, and now better defined.
+   The instrument table removes the last obstacle — a gold or oil series from the
+   World Bank Pink Sheet (CC-BY, monthly, keyless) or a futures series with open
+   interest can be stored against a proper instrument identity — but no fetcher is
+   wired. Exchange-consolidated US single-stock prices and OPRA option chains remain
+   unobtainable without credentials, and this project will not obtain them by
+   defeating an access control. `import-history` remains the only path for a user
+   export, and `AUDIT.md` §8 records why.
+6. **A persistent watchlist.** The threshold rule exists and is tested; nothing
+   persists it or re-runs it. No SMTP, webhook or scheduler will be added without an
+   explicit decision, because notification infrastructure that does not exist must
+   not be implied by a report that mentions one.
+7. **A falsifiable forecast objective.** The honest replacement for an unattainable
+   direction target is HAR-log on a range proxy, benchmarked against random-walk and
+   EWMA, scored through the existing hash-chained prospective ledger. `lele
+   volatility` now produces the target variable; the forecasting half is unbuilt.
+8. **The rest of the standing queue below**, unchanged: P09 prospective
    evaluation across all four required classes, and the M01–M05 line.
 
 **Item 1 of the previous queue is closed, and not by fetching anything.** The

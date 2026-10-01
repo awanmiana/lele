@@ -648,6 +648,111 @@ Evidence may also be supplied as CSV with the same information: 22 columns — t
 
 The cumulative 24/48/72-hour precursor windows end **before the move START**, not its outcome timestamp. Only evidence observed within the window and available before the start is referenced. Late-publication counts deduplicate event/record pairs across nested windows and refer to reported events. Full included records — including mappings — are retained once in the report, with platform/industry/location and source intact. No observations means unknown coverage, not no activity. Routed `from`/`to` values record documented transfer legs only: no cross-platform sums, inferred money origins, guaranteed liquidation levels or confirmed capitulation/bottom calls are produced. `stated_reason`/`documented_mandate` quote the source's attribution; `analyst_hypothesis` is interpretation and is never presented as the actor's actual reason. Gross volume is not net inflow; timing is not causation. Effects on projection accuracy remain untested and `project` is unchanged.
 
+## Instrument identity, realized volatility, and unusual moves (v17)
+
+Four commands and two tables answer the question "how much does this asset
+usually move, and is this move unusual for it?" That question is answerable from
+stored bars. "Where will it go next" is a different question and is not answered
+here.
+
+```bash
+lele instruments add ID --symbol SYMBOL --venue VENUE --asset-class CLASS [options]
+lele instruments list [--asset-class CLASS] [--symbol SYM]
+lele instruments show ID
+lele volatility ID [--interval 1d|4h|1h] [--window-bars N]
+                  [--estimator NAME]... [--asset-class CLASS] [--store]
+lele rag detect-anomalies --instrument-key KEY [--mode percentile|z_score|absolute]
+                          [--level LEVEL] [--window-bars N] [--baseline-bars N]
+lele framework list|show|excluded|all [--grade GRADE] [--topic TOPIC]
+```
+
+**A symbol is not an identity.** `instruments` records symbol, venue, asset class,
+quote currency, contract multiplier, expiry, adjustment basis and the recorded
+basis on which the series may be used. The same symbol on two venues is two
+instruments; a continuous futures series is not a fixed-expiry contract; a
+back-adjusted series is not the unadjusted one. That distinction previously lived
+only inside an `evidence` blob, which nothing could join or filter on.
+`rights_verified` is always false: nothing in this project verifies a
+redistribution right, and no contact address was invented to obtain one.
+
+**`volatility` implements nine estimators** from stored OHLC, all in `Decimal`:
+
+| Estimator | Note |
+|---|---|
+| `close_to_close`, `close_to_close_demeaned` | zero drift is biased upward by μ²; demeaning spends a degree of freedom |
+| `parkinson` | high-low only; cannot see an opening gap |
+| `garman_klass` | signed per-bar terms; summed before rooting |
+| `rogers_satchell` | allows drift; still assumes no opening gap |
+| `yang_zhang` | the only one carrying an explicit overnight-gap term |
+| `lpv` | **the default**, the equal-weighted mean of Parkinson, Garman-Klass and Rogers-Satchell |
+| `atr`, `natr` | Wilder smoothing, seed pinned |
+
+Each estimate reports the **convention that produced it** — drift handling, ddof,
+the Yang–Zhang weight formula, the ATR seed and period — because the estimator name
+alone is not reproducible. Two reputable references give two formulas for the
+Yang–Zhang weight `k` (~0.2% apart); this project pins the TTR form and records the
+choice in every stored row.
+
+Why `lpv` is the default rather than the most accurate-sounding estimator: across
+replicated studies the R² of all five range estimators against next-period realized
+volatility is nearly identical (roughly 43–46%). The high/low information buys
+*calibration*, not predictive power. Averaging is the choice that is hard to get
+badly wrong when no prior information favours one estimator.
+
+**What is refused rather than approximated.** A window whose bars are not
+contiguous is refused with `window_spans_gap`, because a 30-bar window across a
+missing bar covers more elapsed time than it names. A signed Garman-Klass or
+Rogers-Satchell total that is not positive is `not_computable`, never clamped to a
+small number. An all-identical-price window is `not_computable`, because a zero
+variance is not a volatility of zero to be divided by later. Realized kernel and
+bipower jump detection need an intraday sampling grid and are **absent** rather than
+approximated from daily bars. An unregistered instrument has no asset class, so its
+annualized figure is `unknown` rather than scaled by an assumed 252. Annualization
+multiplies by a conventional bars-per-year count (252 session-based, 365 crypto) and
+is recorded as a comparability convention, not a scaling law.
+
+`natr` is explicitly flagged as **not** invariant to an additive splice, because it
+divides a price range by a price. On a spliced futures or crypto series the usable
+figures are absolute `atr` and the log-return estimators.
+
+**`detect-anomalies` judges a window against that instrument's own trailing
+distribution.** Three modes, in order of preference:
+
+- `percentile` (default) — the empirical CDF, so no distributional assumption.
+  Primary, because returns are fat-tailed and a Gaussian table would overstate how
+  exceptional a move is.
+- `z_score` — reported beside it, because a percentile cannot distinguish the 94th
+  from the 96th at n=20.
+- `absolute` — comparable across instruments, and the only mode where a fixed
+  percentage is meaningful. Kept because sometimes that is genuinely the question.
+
+The baseline **never contains the window being judged**: including it inflates the
+mean and deflates the spread, compressing the score toward zero until the threshold
+quietly stops firing. Minimum baselines are 100 observations for a percentile, 60
+for a z-score (the sample standard deviation's relative error is ~15% at n=20 and
+~9% at n=60), 20 for an absolute rule. Below the minimum the verdict is `null` with
+the reason, never a confident answer.
+
+Observed live on 267 daily bars of a synthetic index series, 258 windows examined:
+the 95th-percentile rule flagged 8 moves, the 99.5th flagged 1, and an absolute 3%
+rule flagged **36** — the same data, the same windows, and a fixed percentage firing
+four times as often. That gap is the argument for the percentile mode.
+
+Severity is derived from the percentile **observed**, not from the level requested,
+so a permissive 95th-percentile rule cannot manufacture `critical` alarms.
+
+**`framework` is a cited record, not advice.** It holds documented positions on how
+money is allocated, each with its primary source, an evidence grade
+(`primary`/`secondary`/`vendor`), and the documented criticism of it. It also holds
+an explicit list of widely circulated claims this project **declines to assert**
+because no primary source was reached — including the Paul Tudor Jones 1/5/6 rule,
+"volatility-managed portfolios doubled the Sharpe ratio", and the specific
+Bogle/Cooke/Buffett figures that circulate with citations attached. It produces no
+signal, no score, no ranking and no position, and nothing in it is consumed by any
+detector or estimator. `tests/test_framework_notes.py` enforces this mechanically: a
+directive or a quoted Sharpe/return claim anywhere in the asserted content fails
+the suite.
+
 ## Tiered price moves and pre-move cause scan (M01)
 
 Four commands answer "what happened before this move, and what is happening now with the same settings". They read stored history rather than a supplied file, which is what makes multi-year coverage and repeated current-time scans possible.

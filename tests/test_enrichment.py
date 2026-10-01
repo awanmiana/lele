@@ -133,7 +133,7 @@ class StoredContextProfileTests(unittest.TestCase):
             tier=tier, threshold_percent=str(int(tier[1:])), direction="down",
             start_time=(BASE + timedelta(days=day)).isoformat(),
             end_time=(BASE + timedelta(days=day + 1)).isoformat(), start_price="100",
-            end_price="80", change_percent="-20", realized_volatility_percent="25",
+            end_price="80", change_percent="-20", terminal_bar_range_percent="25",
             baseline_mean_percent="0", baseline_std_percent="2", z_score="-10",
             detected_at="2026-06-01T00:00:00+00:00",
             available_at="2026-06-01T00:00:00+00:00")
@@ -249,7 +249,7 @@ class MagnitudeAndTrendTests(unittest.TestCase):
             tier=tier, threshold_percent=tier[1:], direction="down",
             start_time=(BASE + timedelta(days=day)).isoformat(),
             end_time=(BASE + timedelta(days=day + 1)).isoformat(), start_price="100",
-            end_price="97", change_percent="-3", realized_volatility_percent="3",
+            end_price="97", change_percent="-3", terminal_bar_range_percent="3",
             baseline_mean_percent="0", baseline_std_percent="1", z_score="-3",
             detected_at="2026-06-01T00:00:00+00:00",
             available_at="2026-06-01T00:00:00+00:00")

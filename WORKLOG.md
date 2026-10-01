@@ -1,5 +1,114 @@
 # Lele Worklog
 
+## Current handoff — volatility, instrument identity, and three defects found by naming things honestly (resume here)
+
+**Schema v17. 874 tests, gate green.** This round answered a user question about
+free price data and trading practice, and the answer turned out to be mostly
+negative, so the work that followed was as much removal as addition.
+
+**What was asked, and the shape of the answer.** Can we track all kinds of assets
+for free, how do you measure movement to a given percentage, and how would a
+trader or a multi-millionaire trade? The first answer is a licensing fact rather
+than an engineering one: keyless and terms-clean coverage exists for crypto
+(Binance's `data-api.binance.vision`, Coinbase, Bybit), commodities (World Bank
+Pink Sheet, CC-BY), positioning (CFTC COT), implied vol (Cboe CSVs), stress (OFR)
+and social (Bluesky Jetstream) — but **exchange-consolidated US single-stock prices
+and OPRA chains are not available keyless at all**, and no amount of code changes
+that. The second answer is answerable and is now built. The third is not answerable
+with a recommendation, and the evidence says so unambiguously.
+
+**Delivered.**
+
+- `instruments` table and `lele instruments add|list|show`. A symbol is not an
+  identity: venue, quote currency, contract multiplier, expiry and adjustment basis
+  are now columns rather than an `evidence` blob. Same symbol on two venues is two
+  instruments. `rights_verified` is always false.
+- `analysis/volatility.py`, nine estimators in `Decimal`: close-to-close (both
+  drift conventions), Parkinson, Garman-Klass, Rogers-Satchell, Yang-Zhang, `lpv`
+  as the default average, and ATR/NATR. Each stores the convention that produced it,
+  because the estimator name alone is not reproducible. Verified against independent
+  float references to 15 significant digits.
+- `lele volatility ID` — per-estimator estimates with measured cadence, hole count,
+  and explicit refusal reasons. Annualizes 252/365 by recorded asset class, and
+  reports `unknown` when no class is recorded.
+- Three-mode threshold rule: `percentile` primary, `z_score` secondary, `absolute`
+  for genuinely comparable levels. Minimum baselines 100/60/20; below them the
+  verdict is `null` with a reason. The baseline never contains the window it judges.
+- `lele framework list|show|excluded|all` — cited allocation frameworks with
+  evidence grades and documented criticism, plus an explicit list of claims this
+  project declines to assert. Enforced mechanically: a directive or a quoted
+  Sharpe/return claim fails `tests/test_framework_notes.py`.
+
+**Three defects closed, all the same species — a name or query asserting more than
+the code supported.** Recorded in `AUDIT.md` §10.
+
+1. `move_events.realized_volatility_percent` held the **terminal bar's high-low
+   range**, not a volatility. Renamed to `terminal_bar_range_percent`; the value
+   carried across unchanged with the rename recorded per row and in
+   `meta.migration_notes`. Adding a real estimator beside a field that lied about
+   what it held would have been worse than having neither.
+2. `rag detect-anomalies` queried `observations.source = 'price'`, a column **no
+   fetcher has ever written**, so it could only ever report zero. Its test passed
+   because it manufactured those rows by hand. Rewritten to read `price_bars`, to
+   compare returns rather than price levels, and to exclude the judged window from
+   its baseline. This also gave `price_anomalies` its only writer — which matters
+   because `rag event_indicator_v1` weighted an anomaly component that was
+   structurally always zero.
+3. `causes.scan` passed an int where `moves.validate` expects a sequence, so every
+   argument after `move_hours` was in the wrong slot and it raised on entry. It had
+   no caller and no test. Fixed; the first new test was confirmed to fail against
+   the pre-fix code.
+
+**Two defects this work introduced, caught by running the commands, not the tests.**
+The estimator helpers returned quantized `Decimal` objects; every arithmetic test
+passed and the first real `lele volatility` run raised `TypeError: ... not JSON
+serializable` from inside the encoder. Then severity compared a reported percentile
+(text, for the same reason) against a float. Both are now pinned by serialization
+tests. **The lesson is the recurring one: a test that asserts a value is not a test
+that asserts a contract.** Serializability, precision and convention are contracts.
+
+**Verified.** `.tools/check.sh` passes unpiped: 874 offline tests with
+`ResourceWarning` as an error, `ruff` clean on package and tests, `mypy` clean over
+57 files, `compileall` genuinely compiling `lele` and `tests`. The v16→v17 migration
+was exercised against a database built with the real old DDL holding a stored move:
+version bumped, value carried unchanged, rename note written, migration not repeated
+on second open.
+
+Observed live on 267 synthetic daily index bars, 258 windows examined: the
+95th-percentile rule flagged 8 moves, the 99.5th flagged 1, an absolute 3% rule
+flagged **36**. Same data, same windows, a fixed percentage firing four times as
+often — which is the argument for the percentile mode, measured rather than asserted.
+
+**Precise next task.** Queue item 1, unchanged and still first: re-establish the
+M04/M05 enrichment results on the corrected detector, since those negative results
+were produced by code that could mis-measure a window and should not be cited until
+re-run. Then the newly opened items in `DEVELOPMENT_PLAN.md`: keyless non-Binance
+ingestion (the instrument table removes the last obstacle), a persistent watchlist
+over the threshold rule, and the HAR-log forecasting half as a falsifiable
+replacement for the unattainable direction target. Then prune `price_bars` /
+`move_events` (item 2), provider health on the `ingest_runs` hashes (item 3), and
+the type annotations (item 4).
+
+**Do not** lower the 0.9 constant, invent a contact email or API key, defeat the
+Stooq or Yahoo access controls, emit a buy/sell/hold signal, or ship an in-sample
+performance figure without an out-of-sample protocol and a cost model. The evidence
+against each is in `AUDIT.md` §11.
+
+**Dirty files, uncommitted, nothing staged or pushed:** `AUDIT.md`,
+`DEVELOPMENT_PLAN.md`, `README.md`, `WORKLOG.md`, `lele/analysis/causes.py`,
+`lele/analysis/framework_notes.py` (new), `lele/analysis/moves.py`,
+`lele/analysis/projection.py`, `lele/analysis/prospective.py`, `lele/analysis/rag.py`,
+`lele/analysis/timeline.py`, `lele/analysis/volatility.py` (new),
+`lele/cli/main.py`, `lele/core/constants.py`, `lele/core/db.py`,
+`lele/core/registry.py`, `lele/core/schema.py`, `tests/test_cli.py`,
+`tests/test_db_guarantees.py`, `tests/test_enrichment.py`,
+`tests/test_framework_notes.py` (new), `tests/test_instruments.py` (new),
+`tests/test_packaging.py`, `tests/test_price_causes.py`, `tests/test_projection.py`,
+`tests/test_pipeline_integration.py`, `tests/test_rag.py`, `tests/test_volatility.py`
+(new).
+
+---
+
 ## Current handoff — non-Binance price history, and the gate that was not gating (user-directed; resume here)
 
 **Two defects in the gate itself, and the first queue item closed by not

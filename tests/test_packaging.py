@@ -36,7 +36,7 @@ class PackagingTests(unittest.TestCase):
     def test_supported_runtime(self):
         self.assertGreaterEqual(sys.version_info, (3, 11))
         self.assertGreaterEqual(sqlite3.sqlite_version_info, (3, 35, 0))
-        self.assertEqual(constants.REGISTRY_SCHEMA_VERSION, 16)
+        self.assertEqual(constants.REGISTRY_SCHEMA_VERSION, 17)
 
     def test_version_command_json(self):
         out, err = io.StringIO(), io.StringIO()

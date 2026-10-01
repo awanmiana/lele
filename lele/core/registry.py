@@ -1074,6 +1074,203 @@ def _decimal_text(value, label, required=True):
     return str(number)
 
 
+# --- instruments ---
+
+ADJUSTMENT_BASES = ("adjusted", "unadjusted", "unknown")
+
+
+def add_instrument(conn, *, entity_id: int, symbol: str, asset_class: str, venue: str = "",
+                   quote_currency: str = "", contract_multiplier: str = "",
+                   expiry: str = "", adjustment_basis: str = "unknown",
+                   rights_basis: str = "unknown", rights_verified: bool = False,
+                   first_seen_at: str = "", last_seen_at: str = "", notes: str = "") -> int:
+    """Record what a tradable thing *is*, so price rows can be compared across venues.
+
+    A symbol is not an identity: `GC=F` is a continuous futures series and not a
+    fixed-expiry contract, `BTCUSDT` on two venues is two instruments, and a
+    back-adjusted series is not the unadjusted one. That distinction was previously
+    carried only inside an `evidence` blob, which nothing could join or filter on.
+    """
+    if type(entity_id) is not int or entity_id <= 0:
+        raise ValueError("entity_id must be a positive integer")
+    if not conn.execute("SELECT 1 FROM entities WHERE id=?", (entity_id,)).fetchone():
+        raise ValueError(f"entity {entity_id} not found")
+    _observation_text(symbol, "symbol", 128, True)
+    _observation_text(asset_class, "asset_class", 64, True)
+    _observation_text(venue, "venue", 256)
+    _observation_text(quote_currency, "quote_currency", 32)
+    _observation_text(contract_multiplier, "contract_multiplier", 64)
+    _observation_text(expiry, "expiry", 64)
+    _observation_text(rights_basis, "rights_basis", 256)
+    _observation_text(first_seen_at, "first_seen_at", 64)
+    _observation_text(last_seen_at, "last_seen_at", 64)
+    _observation_text(notes, "notes")
+    if adjustment_basis not in ADJUSTMENT_BASES:
+        raise ValueError(f"adjustment_basis must be one of {', '.join(ADJUSTMENT_BASES)}")
+    if type(rights_verified) is not bool:
+        raise ValueError("rights_verified must be a boolean")
+    row = conn.execute(
+        """INSERT INTO instruments(entity_id, symbol, venue, asset_class, quote_currency,
+             contract_multiplier, expiry, adjustment_basis, rights_basis, rights_verified,
+             first_seen_at, last_seen_at, notes)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(symbol, venue, asset_class) DO UPDATE SET
+             entity_id=excluded.entity_id, quote_currency=excluded.quote_currency,
+             contract_multiplier=excluded.contract_multiplier, expiry=excluded.expiry,
+             adjustment_basis=excluded.adjustment_basis, rights_basis=excluded.rights_basis,
+             rights_verified=excluded.rights_verified, last_seen_at=excluded.last_seen_at,
+             notes=excluded.notes
+           RETURNING id""",
+        (entity_id, symbol.strip(), venue.strip(), asset_class.strip(), quote_currency.strip(),
+         contract_multiplier.strip(), expiry.strip(), adjustment_basis, rights_basis,
+         1 if rights_verified else 0, first_seen_at, last_seen_at, notes),
+    ).fetchone()
+    return int(row[0])
+
+
+def list_instruments(conn, *, entity_id: int | None = None, asset_class: str = "",
+                     symbol: str = "", limit: int = 1000) -> list[dict]:
+    if entity_id is not None and (type(entity_id) is not int or entity_id <= 0):
+        raise ValueError("entity_id must be a positive integer or None")
+    _observation_text(asset_class, "asset_class", 64)
+    _observation_text(symbol, "symbol", 128)
+    if type(limit) is not int or not 1 <= limit <= 5000:
+        raise ValueError("limit must be an integer from 1 to 5000")
+    sql = ("SELECT i.*, e.key AS entity_key FROM instruments i"
+           " JOIN entities e ON e.id = i.entity_id")
+    params: list = []
+    if entity_id is not None:
+        sql += " WHERE i.entity_id=?"
+        params.append(entity_id)
+    if asset_class:
+        sql += (" AND" if entity_id is not None else " WHERE") + " i.asset_class=?"
+        params.append(asset_class)
+    if symbol:
+        sql += (" AND" if (entity_id is not None or asset_class) else " WHERE") + " i.symbol=?"
+        params.append(symbol)
+    sql += " ORDER BY i.asset_class, i.symbol, i.venue LIMIT ?"
+    params.append(limit)
+    return [dict(row) for row in conn.execute(sql, params)]
+
+
+def get_instrument(conn, entity_key: str, *, venue: str = "", asset_class: str = "") -> dict | None:
+    """The instrument row for an entity, or None.
+
+    `venue` and `asset_class` disambiguate only when they are given. Guessing a
+    default venue would silently pick one of several series for the same entity.
+    """
+    _observation_text(entity_key, "entity_key", 512, True)
+    _observation_text(venue, "venue", 256)
+    _observation_text(asset_class, "asset_class", 64)
+    sql = ("SELECT i.*, e.key AS entity_key FROM instruments i"
+           " JOIN entities e ON e.id = i.entity_id WHERE e.key=?")
+    params: list = [entity_key]
+    if venue:
+        sql += " AND i.venue=?"
+        params.append(venue)
+    if asset_class:
+        sql += " AND i.asset_class=?"
+        params.append(asset_class)
+    sql += " ORDER BY i.id LIMIT 1"
+    row = conn.execute(sql, params).fetchone()
+    return dict(row) if row is not None else None
+
+
+# --- volatility estimates ---
+
+def add_volatility_estimate(conn, *, instrument_key: str, interval_seconds: int, estimator: str,
+                            window_bars: int, as_of: str, window_start: str,
+                            volatility_percent: str, annualized_percent: str, variance: str,
+                            basis: str = "per_bar", annualization: str = "", ddof: int = 0,
+                            convention: str = "{}", baseline_bars: int = 0,
+                            observed_at: str, available_at: str, source_url: str = "",
+                            evidence: str = "") -> int:
+    """Store one volatility estimate together with the convention that produced it.
+
+    The estimator name alone is not reproducible: close-to-close differs by drift
+    handling and ddof, Yang-Zhang differs by its weight `k`, ATR by its seed, and
+    Bollinger by using the population rather than sample deviation. So the
+    convention is stored as data rather than left in a docstring.
+    """
+    _observation_text(instrument_key, "instrument_key", 512, True)
+    if type(interval_seconds) is not int or interval_seconds < 60:
+        raise ValueError("interval_seconds must be an integer of at least 60")
+    _observation_text(estimator, "estimator", 64, True)
+    if type(window_bars) is not int or window_bars < 2:
+        raise ValueError("window_bars must be an integer of at least 2")
+    if type(ddof) is not int or ddof < 0:
+        raise ValueError("ddof must be a nonnegative integer")
+    if type(baseline_bars) is not int or baseline_bars < 0:
+        raise ValueError("baseline_bars must be a nonnegative integer")
+    if basis not in ("per_bar", "window", "per_year"):
+        raise ValueError("basis must be per_bar, window or per_year")
+    for label, value in (("as_of", as_of), ("window_start", window_start),
+                         ("observed_at", observed_at), ("available_at", available_at)):
+        _observation_text(value, label, 64, True)
+    _observation_text(annualization, "annualization", 64)
+    _observation_text(source_url, "source_url", 4096)
+    _observation_text(evidence, "evidence")
+    _observation_text(convention, "convention", 4096)
+    if convention.strip() and not convention.strip().startswith("{"):
+        raise ValueError("convention must be a JSON object when given")
+    numbers = {name: _decimal_text(value, name) for name, value in
+               (("volatility_percent", volatility_percent),
+                ("annualized_percent", annualized_percent), ("variance", variance))}
+    row = conn.execute(
+        """INSERT INTO volatility_estimates(instrument_key, interval_seconds, estimator,
+             window_bars, as_of, window_start, volatility_percent, annualized_percent,
+             variance, basis, annualization, ddof, convention, baseline_bars,
+             observed_at, available_at, source_url, evidence)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(instrument_key, interval_seconds, estimator, window_bars, as_of)
+           DO UPDATE SET
+             window_start=excluded.window_start,
+             volatility_percent=excluded.volatility_percent,
+             annualized_percent=excluded.annualized_percent, variance=excluded.variance,
+             basis=excluded.basis, annualization=excluded.annualization,
+             ddof=excluded.ddof, convention=excluded.convention,
+             baseline_bars=excluded.baseline_bars, observed_at=excluded.observed_at,
+             available_at=excluded.available_at, source_url=excluded.source_url,
+             evidence=excluded.evidence
+           RETURNING id""",
+        (instrument_key, interval_seconds, estimator, window_bars, as_of, window_start,
+         numbers["volatility_percent"], numbers["annualized_percent"], numbers["variance"],
+         basis, annualization, ddof, convention, baseline_bars, observed_at, available_at,
+         source_url, evidence),
+    ).fetchone()
+    return int(row[0])
+
+
+def list_volatility_estimates(conn, instrument_key: str, interval_seconds: int, *,
+                              estimator: str = "", start: str = "", end: str = "",
+                              limit: int = 1000, order: str = "desc") -> list[dict]:
+    _observation_text(instrument_key, "instrument_key", 512, True)
+    if type(interval_seconds) is not int or interval_seconds < 60:
+        raise ValueError("interval_seconds must be an integer of at least 60")
+    _observation_text(estimator, "estimator", 64)
+    if type(limit) is not int or not 1 <= limit <= 20000:
+        raise ValueError("limit must be an integer from 1 to 20000")
+    if order not in ("asc", "desc"):
+        raise ValueError("order must be asc or desc")
+    sql = ("SELECT * FROM volatility_estimates WHERE instrument_key=? AND interval_seconds=?")
+    params: list = [instrument_key, interval_seconds]
+    if estimator:
+        _observation_text(estimator, "estimator", 64, True)
+        sql += " AND estimator=?"
+        params.append(estimator)
+    if start:
+        _observation_text(start, "start", 64, True)
+        sql += " AND as_of>=?"
+        params.append(start)
+    if end:
+        _observation_text(end, "end", 64, True)
+        sql += " AND as_of<=?"
+        params.append(end)
+    sql += f" ORDER BY as_of {order.upper()}, id {order.upper()} LIMIT ?"
+    params.append(limit)
+    return [dict(row) for row in conn.execute(sql, params)]
+
+
 # `open`, `high`, `low` and `close` are the provider and schema field names, so
 # this published signature keeps its spelling; the builtin-shadowing rule exists
 # to catch accidents, not to rename an interface every caller uses.
@@ -1081,6 +1278,7 @@ def add_price_bar(conn, *, instrument_key: str, interval_seconds: int, open_time
                   close_time: str, open: str, high: str,  # noqa: A002
                   low: str, close: str, volume: str, source: str, retrieved_at: str,
                   quote_volume: str = "",
+                  open_interest: str = "",
                   trades: int = 0, source_url: str = "", evidence: str = "") -> int:
     # `open`, `high`, `low` and `close` are the OHLC field names used by every
     # provider and by the schema, so they keep their spelling; the rule exists
@@ -1099,6 +1297,7 @@ def add_price_bar(conn, *, instrument_key: str, interval_seconds: int, open_time
                (("open", open), ("high", high), ("low", low), ("close", close),
                 ("volume", volume))}
     numbers["quote_volume"] = _decimal_text(quote_volume, "quote_volume", required=False)
+    numbers["open_interest"] = _decimal_text(open_interest, "open_interest", required=False)
     with localcontext(Context(prec=60, rounding=ROUND_HALF_EVEN)):
         if min(Decimal(numbers["low"]), Decimal(numbers["close"]),
                Decimal(numbers["open"]), Decimal(numbers["high"])) <= 0:
@@ -1111,21 +1310,25 @@ def add_price_bar(conn, *, instrument_key: str, interval_seconds: int, open_time
             raise ValueError("close must lie within the low..high range")
         if Decimal(numbers["volume"]) < 0 or Decimal(numbers["quote_volume"] or 0) < 0:
             raise ValueError("volume must not be negative")
+        if numbers["open_interest"] and Decimal(numbers["open_interest"]) < 0:
+            raise ValueError("open interest must not be negative")
     row = conn.execute(
         """INSERT INTO price_bars(instrument_key, interval_seconds, open_time, close_time,
-             open, high, low, close, volume, quote_volume, trades, source, source_url,
-             retrieved_at, evidence)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             open, high, low, close, volume, quote_volume, open_interest, trades, source,
+             source_url, retrieved_at, evidence)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(instrument_key, interval_seconds, open_time) DO UPDATE SET
              close_time=excluded.close_time, open=excluded.open, high=excluded.high,
              low=excluded.low, close=excluded.close, volume=excluded.volume,
-             quote_volume=excluded.quote_volume, trades=excluded.trades,
-             source=excluded.source, source_url=excluded.source_url,
+             quote_volume=excluded.quote_volume, open_interest=excluded.open_interest,
+             trades=excluded.trades, source=excluded.source,
+             source_url=excluded.source_url,
              retrieved_at=excluded.retrieved_at, evidence=excluded.evidence
            RETURNING id""",
         (instrument_key, interval_seconds, open_time, close_time, numbers["open"],
          numbers["high"], numbers["low"], numbers["close"], numbers["volume"],
-         numbers["quote_volume"], trades, source, source_url, retrieved_at, evidence),
+         numbers["quote_volume"], numbers["open_interest"], trades, source, source_url,
+         retrieved_at, evidence),
     ).fetchone()
     return int(row[0])
 
@@ -1175,7 +1378,7 @@ def move_tier_percent(tier) -> int | None:
 def add_move_event(conn, *, instrument_key: str, interval_seconds: int, move_hours: int,
                    tier: str, threshold_percent: str, direction: str, start_time: str,
                    end_time: str, start_price: str, end_price: str, change_percent: str,
-                   realized_volatility_percent: str, baseline_mean_percent: str,
+                   terminal_bar_range_percent: str, baseline_mean_percent: str,
                    baseline_std_percent: str, z_score: str, detected_at: str,
                    available_at: str, baseline_percentile: str | None = None,
                    baseline_bars: int = 0, source_url: str = "", evidence: str = "") -> int:
@@ -1198,7 +1401,7 @@ def add_move_event(conn, *, instrument_key: str, interval_seconds: int, move_hou
     numbers = {name: _decimal_text(value, name) for name, value in (
         ("threshold_percent", threshold_percent), ("start_price", start_price),
         ("end_price", end_price), ("change_percent", change_percent),
-        ("realized_volatility_percent", realized_volatility_percent),
+        ("terminal_bar_range_percent", terminal_bar_range_percent),
         ("baseline_mean_percent", baseline_mean_percent),
         ("baseline_std_percent", baseline_std_percent), ("z_score", z_score))}
     percentile = None
@@ -1211,13 +1414,13 @@ def add_move_event(conn, *, instrument_key: str, interval_seconds: int, move_hou
     row = conn.execute(
         """INSERT INTO move_events(instrument_key, interval_seconds, move_hours, tier,
              threshold_percent, direction, start_time, end_time, start_price, end_price,
-             change_percent, realized_volatility_percent, baseline_mean_percent,
+             change_percent, terminal_bar_range_percent, baseline_mean_percent,
              baseline_std_percent, z_score, baseline_percentile, baseline_bars, detected_at,
              available_at, source_url, evidence)
            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(instrument_key, interval_seconds, move_hours, tier, start_time, end_time)
            DO UPDATE SET change_percent=excluded.change_percent,
-             realized_volatility_percent=excluded.realized_volatility_percent,
+             terminal_bar_range_percent=excluded.terminal_bar_range_percent,
              baseline_mean_percent=excluded.baseline_mean_percent,
              baseline_std_percent=excluded.baseline_std_percent, z_score=excluded.z_score,
              baseline_percentile=excluded.baseline_percentile,
@@ -1227,7 +1430,7 @@ def add_move_event(conn, *, instrument_key: str, interval_seconds: int, move_hou
            RETURNING id""",
         (instrument_key, interval_seconds, move_hours, tier, numbers["threshold_percent"],
          direction, start_time, end_time, numbers["start_price"], numbers["end_price"],
-         numbers["change_percent"], numbers["realized_volatility_percent"],
+         numbers["change_percent"], numbers["terminal_bar_range_percent"],
          numbers["baseline_mean_percent"], numbers["baseline_std_percent"], numbers["z_score"],
          percentile, baseline_bars, detected_at, available_at, source_url, evidence),
     ).fetchone()

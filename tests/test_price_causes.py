@@ -477,6 +477,37 @@ class ScanTests(RegistryCase):
         self.assertFalse(report["coverage"]["truth_verified"])
 
 
+class CausesScanTests(RegistryCase):
+    """`causes.scan` had no caller and no test, and raised on entry.
+
+    It passed `medium_percent` where `moves.validate` expects a sequence of
+    thresholds, so every argument after `move_hours` landed in the wrong slot and
+    the function could only ever raise `ValueError`. With no stored bars it
+    returns before touching the network, so the entry path is testable offline.
+    """
+
+    def test_entry_path_validates_and_reports_rather_than_raising(self):
+        report = causes.scan(self.conn, self.entity_id, KEY, 86400, medium_percent=5,
+                             big_percent=10, baseline_bars=90)
+        self.assertEqual(report["method"], causes.METHOD)
+        self.assertEqual(report["parameters"]["medium_percent"], 5)
+        self.assertEqual(report["parameters"]["big_percent"], 10)
+        self.assertEqual(report["parameters"]["baseline_bars"], 90)
+        self.assertFalse(report["truth_verified"])
+
+    def test_its_thresholds_are_validated_as_a_sequence(self):
+        """Descending or non-integer tiers must be refused, which the shifted
+        call could never do because it never reached the check."""
+        for medium, big in ((10, 5), (5, 5), (0, 10), (5, 10.5)):
+            with self.assertRaises(ValueError):
+                causes.scan(self.conn, self.entity_id, KEY, 86400, medium_percent=medium,
+                            big_percent=big)
+
+    def test_a_topic_the_provider_would_reject_is_refused(self):
+        with self.assertRaises(ValueError):
+            causes.scan(self.conn, self.entity_id, KEY, 86400, topic="bad!")
+
+
 class ProfileTests(RegistryCase):
 
     def _cause(self, move_id, category, key="a"):
@@ -491,7 +522,7 @@ class ProfileTests(RegistryCase):
             tier=tier, threshold_percent="10", direction=direction,
             start_time=f"2026-01-{index:02d}T00:00:00+00:00",
             end_time=f"2026-01-{index + 1:02d}T00:00:00+00:00", start_price="100",
-            end_price="80", change_percent="-20", realized_volatility_percent="25",
+            end_price="80", change_percent="-20", terminal_bar_range_percent="25",
             baseline_mean_percent="0", baseline_std_percent="2", z_score="-10",
             detected_at="2026-02-01T00:00:00+00:00",
             available_at="2026-02-01T00:00:00+00:00")

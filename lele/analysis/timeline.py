@@ -78,7 +78,8 @@ CHANNEL_REMEDY = {
                            "/ fetch-political / fetch-sentiment / fetch-stablecoins",
     "headlines": "lele fetch-news-feed ID TOPIC --output news.json",
     "documented_money_flows": "lele flows import flows.json",
-    "price_anomalies": "lele rag detect-anomalies --instrument-key KEY",
+    "price_anomalies": "lele rag detect-anomalies --instrument-key KEY --mode percentile "
+                           "--level 95",
 }
 
 

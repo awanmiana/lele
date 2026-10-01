@@ -17,8 +17,9 @@ from urllib.error import URLError
 
 from ..analysis import (causes, comparison, engine, episodes, events, evidence_store, flows,
                         moves, observations, price_import, projection, prospective, rag,
-                        sanctions, signals, timeline, volatility_anomaly, worldstate)
-from ..core import importer, registry
+                        framework_notes, sanctions, signals, timeline, volatility,
+                        volatility_anomaly, worldstate)
+from ..core import clock, importer, registry
 from ..core import constants
 from ..core.constants import (APP_NAME, APP_VERSION, DB_PATH, FETCH_MAX_LIMIT,
                               REGISTRY_SCHEMA_VERSION)
@@ -82,6 +83,9 @@ COMMANDS = {
     "explain": "What is recorded for an instrument in a time window, and what is not",
     "capital": "Capital, supply and positioning records for an instrument in a time window",
     "moves": "Detect tiered non-overlapping price moves from stored history",
+    "instruments": "Record and list what a tradable thing is, so price series are comparable",
+    "volatility": "Estimate realized volatility of stored history per estimator, with convention",
+    "framework": "Cited record of documented allocation frameworks, their evidence and their critiques",
     "causes": "Attribute candidate reasons to stored moves and profile them against controls",
     "scan": "Detect what is happening now with the parameters used for history",
     "sentiment": "Record supplied-text sentiment",
@@ -316,11 +320,21 @@ def build_parser():
     rag_parser.add_argument("--window-hours", type=int, choices=range(1, 169), default=24, metavar="1..168", help="Time window for build-graph and attribute-flows (default: 24)")
     rag_parser.add_argument("--min-strength", type=float, default=0.1, metavar="0.0..1.0", help="Minimum relationship strength for build-graph (default: 0.1)")
     rag_parser.add_argument("--instrument-key", help="Instrument key for detect-anomalies and indicator")
-    rag_parser.add_argument("--anomaly-type", default="volatility_spike", help="Anomaly type for detect-anomalies (default: volatility_spike)")
-    rag_parser.add_argument("--lookback-days", type=int, choices=range(1, 366), default=30, metavar="1..365", help="Lookback days for detect-anomalies (default: 30)")
-    rag_parser.add_argument("--threshold-sigma", type=float, default=2.0, metavar="0.1..10.0", help="Sigma threshold for detect-anomalies (default: 2.0)")
+    rag_parser.add_argument("--anomaly-type", default="volatility_spike", help="Unused; retained for compatibility with earlier invocations")
+    rag_parser.add_argument("--mode", default="percentile", choices=tuple(volatility.THRESHOLD_MODES),
+                            help="How a move is judged unusual (default: percentile)")
+    rag_parser.add_argument("--level", default="95", metavar="LEVEL",
+                            help="Percentile 1..100, or a z-score, or an absolute percent "
+                                 "(default: 95, a 95th-percentile move)")
+    rag_parser.add_argument("--window-bars", type=int, default=24, metavar="2..2000",
+                            help="Bars in the window being judged (default: 24)")
+    rag_parser.add_argument("--baseline-bars", type=int, default=120, metavar="1..10000",
+                            help="Earlier moves forming the baseline, which never contains "
+                                 "the window being judged (default: 120)")
+    rag_parser.add_argument("--interval-seconds", type=int, default=86400, metavar="60..31536000",
+                            help="Stored bar interval to read (default: 86400)")
     rag_parser.add_argument("--limit", type=int, choices=range(1, 101), default=20, metavar="1..100", help="Limit for indicator (default: 20)")
-    rag_parser.epilog = "RAG pipeline for political/regulatory/market events: store-events imports events into event_store; build-graph creates event_relationships within a time window; attribute-flows links money_flows to events; detect-anomalies finds price volatility anomalies; indicator computes a composite event_indicator_v1 score. All operations preserve provenance and use point-in-time discipline."
+    rag_parser.epilog = "RAG pipeline for political/regulatory/market events: store-events imports events into event_store; build-graph creates event_relationships within a time window; attribute-flows links money_flows to events; detect-anomalies flags stored-bar windows whose move is unusual for that instrument against a baseline that excludes the window itself; indicator computes a composite event_indicator_v1 score. All operations preserve provenance and use point-in-time discipline. An anomaly is an unusual move, not a cause and not a forecast."
     indicators_parser = parsers["indicators"]
     indicators_parser.add_argument("action", choices=("list", "spec", "compute", "project"))
     indicators_parser.add_argument("args", nargs="*", metavar="ARG")
@@ -454,6 +468,73 @@ def build_parser():
         "change and selected so no two moves share a bar, so one crash is not counted many times. "
         "Each move is scored against the baseline-bars returns strictly before it, never itself. "
         "A move is a price outcome label, not a cause and not a forecast.")
+    instrument_parser = parsers["instruments"]
+    instrument_parser.add_argument("action", choices=("add", "list", "show"))
+    instrument_parser.add_argument("id", type=_eid, nargs="?", metavar="ID")
+    instrument_parser.add_argument("--symbol", default="", help="Provider symbol such as BTCUSDT")
+    instrument_parser.add_argument("--venue", default="",
+                                   help="Trading venue or data provider that publishes the symbol")
+    instrument_parser.add_argument("--asset-class", default="",
+                                   choices=sorted(projection.ASSET_CLASSES),
+                                   help="Asset class; an unrecognized class cannot be annualized")
+    instrument_parser.add_argument("--quote-currency", default="",
+                                   help="Currency the price is quoted in")
+    instrument_parser.add_argument("--contract-multiplier", default="",
+                                   help="Contract size, for a series quoted per contract")
+    instrument_parser.add_argument("--expiry", default="", help="Expiry, for a dated contract")
+    instrument_parser.add_argument("--adjustment", default="unknown",
+                                   choices=tuple(registry.ADJUSTMENT_BASES),
+                                   help="Whether the series is split/dividend adjusted "
+                                        "(default: unknown)")
+    instrument_parser.add_argument("--rights-basis", default="unknown",
+                                   help="Recorded basis of the right to use and redistribute "
+                                        "this series (default: unknown)")
+    instrument_parser.add_argument("--notes", default="")
+    instrument_parser.add_argument("--limit", type=int, default=200, metavar="1..5000")
+    instrument_parser.set_defaults(format="json")
+    instrument_parser.epilog = ("A symbol is not an identity: a continuous futures series is not "
+        "a fixed-expiry contract, the same symbol on two venues is two instruments, and a "
+        "back-adjusted series is not the unadjusted one. This records that distinction so price "
+        "bars and volatility estimates can be compared across instruments. rights_verified is "
+        "always false: nothing in this project verifies a redistribution right.")
+    volatility_parser = parsers["volatility"]
+    volatility_parser.add_argument("id", type=_eid, metavar="ID")
+    volatility_parser.add_argument("--interval", choices=tuple(history.INTERVALS), default="1d",
+                                   help="Stored bar interval to read (default: 1d)")
+    volatility_parser.add_argument("--window-bars", type=int, default=30, metavar="2..2000",
+                                   help="Bars in the estimation window (default: 30)")
+    volatility_parser.add_argument("--estimator", action="append", default=[],
+                                   choices=tuple(volatility.ESTIMATORS),
+                                   help="Estimator to run; repeatable. Default: every estimator")
+    volatility_parser.add_argument("--asset-class", default="",
+                                   choices=sorted(projection.ASSET_CLASSES),
+                                   help="Override the asset class used for annualization "
+                                        "(default: the registered instrument's class)")
+    volatility_parser.add_argument("--store", action="store_true",
+                                   help="Write volatility_estimates rows")
+    framework_parser = parsers["framework"]
+    framework_parser.add_argument("action", choices=("list", "show", "excluded", "all"))
+    framework_parser.add_argument("key", nargs="?", metavar="KEY",
+                                  help="Framework key for show")
+    framework_parser.add_argument("--grade", default="", choices=framework_notes.GRADES,
+                                  help="Filter by evidence grade: primary, secondary, vendor")
+    framework_parser.add_argument("--topic", default="",
+                                  help="Filter by the question a note bears on, such as "
+                                       "backtesting or position_sizing")
+    framework_parser.set_defaults(format="json")
+    framework_parser.epilog = ("A documented record of how money is allocated, with the "
+        "documented criticism of each entry and an explicit list of widely circulated "
+        "claims this project declines to assert because no primary source was reached. "
+        "Every entry is a cited position, not a validated technique. This command "
+        "produces no signal, no score, no ranking and no position, and nothing in it is "
+        "consumed by any detector or estimator.")
+    volatility_parser.set_defaults(format="json")
+    volatility_parser.epilog = ("Realized volatility from stored OHLC: close-to-close, Parkinson, "
+        "Garman-Klass, Rogers-Satchell, Yang-Zhang, the LPV average, and ATR/NATR. Each reports "
+        "the convention that produced it, because the estimator name alone is not reproducible. "
+        "A window spanning a missing bar is refused, not measured. Anything not computable at "
+        "this bar resolution is reported as unknown. A volatility is a risk measure; it is not "
+        "a direction, a cause, or a forecast.")
     cause_parser = parsers["causes"]
     cause_parser.add_argument("action", choices=("attribute", "profile", "context"))
     cause_parser.add_argument("id", type=_eid, metavar="ID")
@@ -1136,6 +1217,33 @@ def _validate_moves(args):
         raise CLIError(str(exc), 2) from exc
 
 
+def _validate_instruments(args):
+    if type(args.limit) is not int or not 1 <= args.limit <= 5000:
+        raise CLIError("limit must be an integer from 1 to 5000", 2)
+    if args.action == "show" and args.id is None:
+        raise CLIError("instruments show needs an ID", 2)
+    if args.action == "add":
+        if not args.symbol.strip():
+            raise CLIError("instruments add needs --symbol", 2)
+        if not args.asset_class:
+            raise CLIError("instruments add needs --asset-class", 2)
+
+
+def _validate_volatility(args):
+    interval_seconds = history.INTERVALS[args.interval]
+    if type(args.window_bars) is not int or not (volatility.MIN_WINDOW_BARS <= args.window_bars
+                                                 <= volatility.MAX_WINDOW_BARS):
+        raise CLIError(f"window bars must be an integer from {volatility.MIN_WINDOW_BARS} to "
+                       f"{volatility.MAX_WINDOW_BARS}", 2)
+    unknown = [name for name in args.estimator if name not in volatility.ESTIMATORS]
+    if unknown:
+        raise CLIError(f"estimator must be one of {', '.join(volatility.ESTIMATORS)}", 2)
+    if args.asset_class and args.asset_class not in projection.ASSET_CLASSES:
+        raise CLIError(f"asset class must be one of {', '.join(sorted(projection.ASSET_CLASSES))}",
+                       2)
+    del interval_seconds
+
+
 def _validate_causes(args):
     interval_seconds = history.INTERVALS[args.interval]
     if args.action == "context":
@@ -1210,6 +1318,7 @@ READ_ONLY_ACTIONS = {
     "store-evidence": frozenset({"all"}),
     "prospective": frozenset({"score"}),
     "causes": frozenset({"profile", "context"}),
+    "instruments": frozenset({"list", "show"}),
 }
 
 READ_ONLY_COMMANDS = frozenset({
@@ -1415,6 +1524,74 @@ def _dispatch(args):
             return moves.detect(conn, entity["key"], history.INTERVALS[args.interval],
                                 args.move_hours, tuple(args.thresholds), args.baseline_bars,
                                 args.limit, not args.no_store)
+    if command == "instruments":
+        _validate_instruments(args)
+        if args.action == "list":
+            with registry.get_read_conn(args.db) as conn:
+                return {"method": "instrument_inventory_v1",
+                        "instruments": registry.list_instruments(
+                            conn, entity_id=None if args.id is None else args.id,
+                            asset_class=args.asset_class, symbol=args.symbol, limit=args.limit)}
+        if args.action == "show":
+            if args.id is None:
+                raise ValueError("instruments show needs an ID")
+            with registry.get_read_conn(args.db) as conn:
+                entity = _instrument(conn, args)
+                rows = registry.list_instruments(conn, entity_id=entity["id"])
+                return {"method": "instrument_inventory_v1", "entity_key": entity["key"],
+                        "instruments": rows,
+                        "note": ("no instrument is registered for this entity, so its price "
+                                 "bars carry no venue, currency or adjustment basis"
+                                 if not rows else None)}
+        if not args.symbol:
+            raise ValueError("instruments add needs --symbol")
+        if not args.asset_class:
+            raise ValueError("instruments add needs --asset-class")
+        with registry.get_conn(args.db) as conn:
+            entity = _instrument(conn, args)
+            registry.add_instrument(
+                conn, entity_id=entity["id"], symbol=args.symbol, venue=args.venue,
+                asset_class=args.asset_class, quote_currency=args.quote_currency,
+                contract_multiplier=args.contract_multiplier, expiry=args.expiry,
+                adjustment_basis=args.adjustment, rights_basis=args.rights_basis,
+                rights_verified=False, first_seen_at=clock.now().replace(
+                    microsecond=0).isoformat(),
+                last_seen_at=clock.now().replace(microsecond=0).isoformat(),
+                notes=args.notes)
+            return {"method": "instrument_inventory_v1", "entity_key": entity["key"],
+                    "stored": 1, "rights_verified": False,
+                    "rights_note": "this project never verifies redistribution rights, so the "
+                                   "recorded basis stays as supplied and the flag stays false",
+                    "instruments": registry.list_instruments(conn, entity_id=entity["id"])}
+    if command == "framework":
+        if args.action == "show":
+            if not args.key:
+                raise CLIError("framework show needs a KEY", 2)
+            note = framework_notes.get_note(args.key)
+            if note is None:
+                raise CLIError(f"no framework note with key {args.key!r}", 2)
+            return {"method": framework_notes.METHOD, "note": note,
+                    "not_a_signal": list(framework_notes.NOT_A_SIGNAL)}
+        if args.action == "excluded":
+            return {"method": framework_notes.METHOD,
+                    "note": "claims this project declines to assert, and why",
+                    "excluded": framework_notes.excluded()}
+        if args.action == "all":
+            return framework_notes.report()
+        notes = framework_notes.list_notes(grade=args.grade, topic=args.topic)
+        return {"method": framework_notes.METHOD, "count": len(notes),
+                "grade_filter": args.grade or None, "topic_filter": args.topic or None,
+                "notes": notes, "not_a_signal": list(framework_notes.NOT_A_SIGNAL)}
+    if command == "volatility":
+        _validate_volatility(args)
+        store = bool(args.store)
+        with (registry.get_conn(args.db) if store
+              else registry.get_read_conn(args.db)) as conn:
+            entity = _instrument(conn, args)
+            return volatility.measure(
+                conn, entity["key"], history.INTERVALS[args.interval],
+                estimators=tuple(args.estimator) or None, window_bars=args.window_bars,
+                asset_class=args.asset_class, store=store)
     if command == "causes":
         _validate_causes(args)
         with (registry.get_conn(args.db) if args.action == "attribute"
@@ -1478,7 +1655,14 @@ def _dispatch(args):
             if args.action == "detect-anomalies":
                 if not args.instrument_key:
                     raise CLIError("--instrument-key is required for detect-anomalies", 2)
-                return {"anomalies": rag.detect_anomalies(conn, args.anomaly_type, args.lookback_days, args.threshold_sigma)}
+                try:
+                    volatility.validate_threshold(args.mode, args.level)
+                except ValueError as exc:
+                    raise CLIError(str(exc), 2) from exc
+                return rag.detect_anomalies(
+                    conn, interval_seconds=args.interval_seconds, mode=args.mode,
+                    level=args.level, window_bars=args.window_bars,
+                    baseline_bars=args.baseline_bars, instrument_key=args.instrument_key)
             if args.action == "indicator":
                 return rag.event_indicator_v1(conn, args.instrument_key, args.limit)
             raise CLIError("unknown rag action", 2)
