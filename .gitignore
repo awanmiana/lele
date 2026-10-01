@@ -6,4 +6,10 @@ __pycache__/
 *.db-wal
 *.db-shm
 .check/
-.tools/
+# The gate is the one command that decides whether this tree is shippable, so it
+# is version-controlled. A check that exists only on the machine that wrote it
+# silently disappears for everyone else, and `compileall` naming a directory the
+# rename had already deleted went unnoticed for exactly that reason. Nothing else
+# under .tools/ is tracked.
+.tools/*
+!.tools/check.sh

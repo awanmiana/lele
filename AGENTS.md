@@ -26,12 +26,25 @@ things the individual commands did not do: the suite runs with
 `mypy` requires full annotations on `core/db.py`, `core/clock.py`,
 `core/schema.py` and `fetchers/http.py`.
 
-Run tests directly. Prior `| tail` pipelines hung in this environment; the cause
-was never established. Do not use repeated pipelines and do not claim a test
-failure without examining direct output — a piped command in this environment
-can hang after the work has already finished. Network tests are opt-in:
-isolate live data in temporary databases, respect rate limits, and never
-fabricate a contact email or bypass blocks.
+Run tests directly and redirect to a file; do not pipe the gate or a test run.
+`.tools/check.sh --fast 2>&1 | tail -20` blocks indefinitely while the very same
+command unpiped finishes in about nine seconds: `time` shows the work completes
+(user time matches the unpiped run) and then the read end waits for an EOF that
+never arrives, and `ps` shows no stray child left behind by the gate. This host
+runs the distribution under **PRoot** on Termux, whose ptrace-based interception
+is the remaining suspect; a plain `tail | sed` on a file is fine, so it is the
+script-plus-children case. Redirecting to a file and reading the file with the
+read tool avoids it entirely:
+
+```bash
+.tools/check.sh --fast > /tmp/check.log 2>&1; echo "exit=$?"
+```
+
+Do not claim a test failure without examining that output. The gate itself is
+asserted by `tests/test_gate.py`, so a step that silently stops checking
+something fails the suite. Network tests are opt-in: isolate live data in
+temporary databases, respect rate limits, and never fabricate a contact email or
+bypass blocks.
 
 ## Time is an input, not an accident
 
