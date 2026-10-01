@@ -16,8 +16,8 @@ import traceback
 from urllib.error import URLError
 
 from ..analysis import (causes, comparison, engine, episodes, events, evidence_store, flows,
-                        moves, observations, projection, prospective, rag, sanctions,
-                        signals, timeline, volatility_anomaly, worldstate)
+                        moves, observations, price_import, projection, prospective, rag,
+                        sanctions, signals, timeline, volatility_anomaly, worldstate)
 from ..core import importer, registry
 from ..core import constants
 from ..core.constants import (APP_NAME, APP_VERSION, DB_PATH, FETCH_MAX_LIMIT,
@@ -62,6 +62,7 @@ COMMANDS = {
     "runs": "List durable ingest runs with counts, coverage and evidence hashes",
     "edges": "Build sourced relationships from stored entities",
     "import": "Import local JSON",
+    "import-history": "Store a user-supplied OHLC export in price history",
     "analyze": "Analyze stored entity data",
     "finmap": "View bounded stored financial positions, not transfers",
     "project": "Project five minutes ahead and evaluate a recorded-price baseline",
@@ -830,6 +831,21 @@ def build_parser():
     runs.add_argument("--limit", type=int, choices=range(1, 1001), default=50, metavar="1..1000")
     runs.epilog = "Completed source ingestion runs recorded in the registry with start/finish times, fetched/stored/skipped/missing counts, pages, truncation, canonical request and stored-record SHA-256 hashes, warnings and coverage text. Failed runs roll back with their transaction and are not listed."
     parsers["import"].add_argument("path", type=_path, metavar="PATH", help="Importer JSON with entities, provenance and relationships")
+    history_import = parsers["import-history"]
+    history_import.add_argument("id", type=_eid, metavar="ID")
+    history_import.add_argument("path", type=_path, metavar="PATH",
+                                help="OHLC export JSON with instrument, source, source_url, retrieved_at and bars")
+    history_import.add_argument("--interval", choices=tuple(price_import.INTERVALS), default="1d",
+                                help="Bar interval the file describes (default: 1d)")
+    history_import.set_defaults(format="json")
+    history_import.epilog = (
+        "Stores a bounded OHLC export in price_bars, idempotent on (instrument, interval, open "
+        "time), so re-running refines rather than duplicates. No network call is made and no "
+        "field is verified: this records the export's claims, with adjustment, venue, asset "
+        "class and rights basis reported as unknown when the file omits them. Cadence and gaps "
+        "are measured from the stored bars rather than assumed from --interval, because an "
+        "equity's daily bars skip weekends. Use it for a listed equity or exchange-traded "
+        "commodity that fetch-history cannot reach; no accuracy claim.")
     sentiment = parsers["sentiment"]
     text = sentiment.add_mutually_exclusive_group(required=True)
     text.add_argument("--text", help=f"Supplied English text, at most {engine.MAX_TEXT_LEN} characters")
@@ -1093,6 +1109,17 @@ def _validate_volatility_analyze(args):
     pass
 
 
+def _validate_import_history(args):
+    # Checked before the registry is opened, so a bad request never creates or
+    # locks a database to then reject the arguments.
+    try:
+        price_import.validate_request(args.interval, price_import._now())
+        if not os.path.isfile(args.path):
+            raise ValueError(f"no such file: {args.path}")
+    except ValueError as exc:
+        raise CLIError(str(exc), 2) from exc
+
+
 def _validate_fetch_history(args):
     try:
         history.validate_request(args.symbol, args.interval, args.limit, args.pages, args.end,
@@ -1316,6 +1343,11 @@ def _dispatch(args):
                 threshold_percent=args.threshold_percent,
                 horizon_hours=args.horizon_hours,
             )
+    if command == "import-history":
+        _validate_import_history(args)
+        with registry.get_conn(args.db) as conn:
+            _instrument(conn, args)
+            return price_import.import_price_history(conn, args.id, args.path, args.interval)
     if command == "fetch-history":
         _validate_fetch_history(args)
         with registry.get_conn(args.db) as conn:

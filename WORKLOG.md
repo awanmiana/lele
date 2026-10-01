@@ -1,6 +1,84 @@
 # Lele Worklog
 
-## Current handoff — reliability audit and repair (user-directed; resume here)
+## Current handoff — non-Binance price history, and the gate that was not gating (user-directed; resume here)
+
+**Two defects in the gate itself, and the first queue item closed by not
+fetching anything.** Everything below was done in one session on 2026-09-28 and
+is recorded in `AUDIT.md` §7–§9.
+
+**First, two gate defects, the same class as the one the audit already found
+once.** `.tools/check.sh` ran `compileall -q finworld`, a directory the rename
+had already deleted; `compileall -q` on a missing path prints `Can't list` and
+**exits 0**, so the bytecode step had been a silent no-op reporting success since
+the rename — and that step existing precisely so a syntax error is the *first*
+thing noticed. Worse, `.gitignore` excluded `.tools/`, so the one command that
+decides whether the tree is shippable existed only on the machine that wrote it.
+Both fixed: the script compiles `lele tests`, the ignore is now `.tools/*` with
+`!.tools/check.sh`, and `tests/test_gate.py` (6 tests) fails if either recurs.
+Three of its tests were confirmed to fail against the pre-fix script.
+
+**Second, the pipe hang now has a narrowed cause.** `AGENTS.md` said the cause
+"was never established". `.tools/check.sh --fast | tail -20` blocks forever while
+the unpiped command finishes in ~9 s; `time` shows the work completing (user time
+matches) and then the read end waiting for an EOF that never comes, and `ps`
+shows no stray child. This host runs the distribution under **PRoot** on Termux,
+whose ptrace interception is the remaining suspect. AGENTS.md now says to
+redirect to a file and read it. **Do not pipe the gate or a test run** — I did it
+twice this session and lost ~12 minutes to it.
+
+**Third, queue item 1 — non-Binance price history — closed as a rights problem,
+not a code one.** TLS to every candidate verified from this host, so reachability
+was never the issue:
+
+- **Stooq** is free, keyless daily OHLC and was the intended pick. It answers
+  *every* request, including the plain CSV download, with a JavaScript
+  proof-of-work browser check whose `/__verify` step exists to keep non-browser
+  clients out. Passing it is defeating an access control, so it is recorded as
+  blocked. **The user had authorized wiring it; the authorization cannot be
+  exercised, because the only way through is a bypass this project forbids. No
+  bypass was attempted.**
+- **Yahoo** is already recorded in this project's own inventory as unsupported.
+- **Alpha Vantage, FMP, Polygon, Twelve Data, EODHD, Nasdaq Data Link** need an
+  API key, which this project treats as blocked until a real one exists. No
+  contact address was invented.
+- **CME/ICE/LBMA** are licensed and paid.
+
+So the provider is the user: `import-history ID PATH [--interval]` stores a
+bounded, validated OHLC export into `price_bars` and makes no network call. 33
+offline tests, including a CLI test that imports 30 daily equity bars and has
+`moves` measure a −14% session. Verified load-bearing behaviour: timestamps are
+canonicalized to UTC *before* the `(instrument, interval, open time)` idempotency
+key is taken, so one session written as `09:30-05:00` and as `14:30Z` is one bar
+rather than two — removing that canonicalization fails the test. `adjustment` is
+required rather than inferred; omitted venue/asset class/rights basis are reported
+in `unknowns` as `unknown`; cadence and holes are measured rather than assumed
+from the interval label, which is what lets `moves` exclude a weekend-spanning
+window instead of calling it a 24-hour move; a bar that has not closed is refused;
+`rights_verified` is always false and a test asserts the module holds no HTTP
+client. **Not verified live**, because it takes no network path and there was no
+user export to run.
+
+**Verified.** `.tools/check.sh` passes unpiped: 754 offline tests with
+`ResourceWarning` as an error, `ruff` clean, `mypy` clean over 56 files,
+`compileall` now genuinely compiling `lele` and `tests`, in 221 s.
+
+**Precise next task.** Queue item 2, unchanged and now first: re-establish the
+M04/M05 enrichment results on the corrected move detector, since those negative
+results were produced by code that could mis-measure a window and should not be
+cited until re-run. After that: prune `price_bars`/`move_events` (item 3),
+provider health monitoring on the `ingest_runs` hashes (item 4, and
+`import-history` now feeds it), then the type annotations (item 5).
+
+**Dirty files, uncommitted, nothing staged or pushed:** `.gitignore`, `AGENTS.md`,
+`AUDIT.md`, `DEVELOPMENT_PLAN.md`, `README.md`, `WORKLOG.md`, `lele/cli/main.py`,
+`tests/test_cli.py`, `tests/test_db_guarantees.py`, and new untracked
+`.tools/check.sh` (previously gitignored), `lele/analysis/price_import.py`,
+`tests/test_gate.py`, `tests/test_price_import.py`.
+
+---
+
+**The audit summary that follows is the prior session's and is retained for
+context.**
 
 **The user asked for a full review of the project: every design, architecture and
 code flaw, every bug, dead end and point of failure; whether the tool can
@@ -134,15 +212,17 @@ so a listed equity has no stored bars and therefore no measured window even
 though its SEC filings and holdings are stored and reported. That last one is
 the obvious next build.
 
-**Precise next task (user-directed choice).** `AUDIT.md` §4 lists the seven
-open items. The highest-value next steps, in order: (1) prune `price_bars` and
-`move_events`, which grow without bound; (2) build provider health monitoring
-on the hashes `ingest_runs` already records, so a source that starts returning
-garbage is noticed without a human reading a report; (3) finish annotating the
-historical modules, which the gate now prevents from growing but does not repay;
-(4) re-run the M04/M05 pre-move enrichment on the repaired detector, because
-those negative results were produced by code that mis-measured windows and should
-be re-established on the corrected one.
+**Precise next task (user-directed choice, superseded by the handoff above).**
+`AUDIT.md` §4 lists the seven open items. The highest-value next steps, in order:
+(1) prune `price_bars` and `move_events`, which grow without bound; (2) build
+provider health monitoring on the hashes `ingest_runs` already records, so a
+source that starts returning garbage is noticed without a human reading a
+report; (3) finish annotating the historical modules, which the gate now prevents
+from growing but does not repay; (4) re-run the M04/M05 pre-move enrichment on
+the repaired detector, because those negative results were produced by code that
+mis-measured windows and should be re-established on the corrected one. Note
+that §4 was where those seven items were supposed to live; they are now in §7,
+which had been an empty heading.
 
 ## Current handoff — tiered moves and pre-move cause scan (user-directed; resume here)
 

@@ -300,6 +300,10 @@ attribution.
    extractors store filings, insider trades and holdings, which `explain` reads
    and reports — but there is no equity price history behind them yet. This is
    the single largest remaining gap and it is the obvious next build.
+   **Partly closed 2026-09-28 — see §8: `import-history` gives a non-Binance
+   instrument stored bars and therefore a measured window, but the *source* is
+   the user's export rather than a wired provider, because no free keyless daily
+   OHLC source permits automated use.**
 4. **Attribution quality, not just availability.** Even where records exist,
    `explain` reports coincidence. Whether a policy publication preceded a move
    and whether it caused it are different questions, and only the first is
@@ -308,3 +312,129 @@ attribution.
 ---
 
 ## 7. Still open, with reasons
+
+Each item is a limit this build cannot lift, with the reason it is still there.
+
+1. **The 90% five-minute direction objective.** Not attainable at that horizon
+   from public data. Not an engineering task, and the target is never lowered to
+   make a number pass.
+2. **Causation.** Unavailable from these sources. The output is built so it
+   cannot be misread as available: nothing is ever marked `is_cause`.
+3. **Historical attribution across years.** The public headline indexes reach
+   back days, not years, and no licensed archive is wired.
+4. **Market-price coverage outside Binance spot.** No free, keyless daily OHLC
+   source permits automated use, Yahoo is unsupported, and the keyed providers
+   need a real key. `import-history` takes the export from the user instead.
+5. **Provider health.** `ingest_runs` records request and record hashes; nothing
+   consumes them, so a source returning garbage is noticed by a human.
+6. **Unbounded growth.** `price_bars` and `move_events` grow forever. Irrelevant
+   for daily bars on one instrument, not for five-minute bars on many.
+7. **Type coverage.** The gate requires full annotations on the foundation
+   modules and prevents the debt growing there; the historical modules still
+   carry bodies that are checked only by execution.
+
+---
+
+## 8. A non-Binance instrument, and two gates that were not gating
+
+Added 2026-09-28, after §6.
+
+### The gap was rights, not code
+
+§6 listed "non-crypto assets end to end" as the largest remaining gap, because
+`fetch-history` reaches only Binance spot pairs: a listed equity had stored SEC
+filings, insider trades and holdings that `explain` reported, and no price to
+measure any window against.
+
+Reaching for a provider is where this stopped. Each candidate fails on rights,
+not on reachability — TLS to all of them was verified from this host:
+
+| Candidate | Finding |
+| --- | --- |
+| Yahoo chart API | Already recorded in this project's own inventory as unsupported with license unverified. Not cleared for stored history. |
+| Stooq | Free, keyless, daily OHLC. Probed on 2026-09-28: **every** request, including the plain `q/d/l` CSV download, returns a JavaScript proof-of-work browser check whose `/__verify` step exists to keep non-browser clients out. Passing it would be defeating an access control, so it is recorded as blocked and no bypass was attempted. |
+| Alpha Vantage, FMP, Polygon, Twelve Data, EODHD, Nasdaq Data Link | Clear terms, but each requires an API key — the same rule that leaves FEC and FRED unwired. No contact address was invented to obtain one. |
+| CME, ICE, LBMA, licensed vendors | Correct data, licensed and paid. Not to be scraped around. |
+
+So the provider is the user. `import-history ID PATH [--interval]` stores a
+bounded OHLC export they took from a source they may use, and makes no network
+call at all. 33 offline tests in `tests/test_price_import.py`.
+
+### What it does not take on trust
+
+- **Validation precedes every write.** A file with one bad bar stores nothing.
+  The tests put the bad row *last*, so a validator that only inspected the
+  opening bars would fail them.
+- **Timestamps are canonicalized to UTC before the idempotency key is taken.**
+  `price_bars` is keyed on open time as text, so one session written as
+  `09:30-05:00` and as `14:30Z` would otherwise be two rows and a re-import would
+  duplicate rather than refine. Verified load-bearing: removing the
+  canonicalization fails that test.
+- **`adjustment` is required, not inferred.** A split repairs nothing and
+  silently corrupts every return that crosses it, so it must be stated
+  `adjusted`, `unadjusted` or `unknown`, and `unknown` is reported as a known
+  unknown.
+- **Absence stays absence.** An omitted venue, asset class or rights basis
+  appears in `unknowns` and is stored as `unknown`; a symbol is never used to
+  guess a venue, a currency or an asset class.
+- **Cadence is measured, gaps are counted.** An equity's daily bars are not one
+  day apart throughout — weekends and holidays alternate the spacing between one
+  day and three — so the report gives the measured dominant spacing and the hole
+  count. This is what lets `moves` exclude a window spanning a weekend instead
+  of reporting it as a 24-hour move.
+- **A bar that has not closed is refused.** `close_time` in the future is not a
+  measurement; when `close_time` is omitted it is derived from `open_time` plus
+  the interval and the stored row records that it was derived.
+- **Nothing is verified.** The report carries `rights_verified: false`
+  unconditionally, and the report's `unknowns` and `limitations` name what it
+  cannot establish. A test asserts the module holds no HTTP client, so the
+  no-network claim is a property rather than a promise.
+
+Verified end to end offline: import 30 daily bars for an equity, then `moves`
+measures the −14% session as one 24-hour move with cadence 86400 and zero gaps.
+Not verified live, because it takes no network path and there was no user export
+to run. **Not achieved:** the data half still needs a licensed source or a user
+export, and no bar from this path has been checked against an independent price.
+
+### Two gate defects, the same class as §3F
+
+The audit already found once that the gates were not gating. Two more instances,
+found while doing the above:
+
+1. **The bytecode step had been a silent no-op since the rename.**
+   `.tools/check.sh` ran `compileall -q finworld`, and the rename had already
+   deleted that directory. `compileall -q` on a missing path prints
+   `Can't list 'finworld'` and **exits 0**, so the gate reported success while
+   checking nothing — which is precisely the lesson it was added for, since
+   `compileall` running before the tests is what makes a syntax error the first
+   thing noticed. It now compiles `lele` and `tests`, and
+   `tests/test_gate.py` fails if the named target is not the importable package.
+2. **The gate was not in version control.** `.gitignore` excluded `.tools/`, so
+   the one command that decides whether the tree is shippable existed only on the
+   machine that wrote it, and the fix above could not have survived a clone. The
+   ignore is now `.tools/*` with `!.tools/check.sh`, and a test asserts both
+   that the gate exists and that it is re-admitted.
+
+`tests/test_gate.py` (6 tests) pins: every gate step names an existing target;
+the compileall target is the importable package; no step acts on an undeclared
+directory; `compileall` exits 0 on a missing path, so the no-op cannot re-arm
+silently; the gate never names the previous package; and the gate is
+version-controlled. Three of them fail against the pre-fix script, verified by
+reverting it.
+
+---
+
+## 9. One hang, cause narrowed
+
+`AGENTS.md` recorded that prior `| tail` pipelines hung in this environment and
+that "the cause was never established". It is now narrowed, which is enough to
+act on. `.tools/check.sh --fast 2>&1 | tail -20` blocks indefinitely while the
+identical unpiped command finishes in about nine seconds: `time` shows the work
+completes — user time matches the unpiped run — and then the read end waits for
+an EOF that never arrives, and `ps` shows no stray child left behind by the gate.
+The host runs this distribution under **PRoot** on Termux, whose ptrace-based
+syscall interception is the remaining suspect; a plain `tail | sed` on a file is
+fine, so it is the script-plus-children case rather than pipes in general.
+
+The operational rule follows from the evidence rather than from the mystery:
+redirect to a file and read the file, do not pipe.

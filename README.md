@@ -172,10 +172,11 @@ input, not a side effect: the same call returns the same answer tomorrow.
 | BLS Labor | US labor statistics (employment, unemployment, JOLTS, wages), via `fetch-bls` | Optional free registration key at https://data.bls.gov/registrationEngine/ for 500 req/day (25 without); common series: LNS14000000, JTS00000000JOL; uses POST |
 | OpenSky Flights | Real-time ADS-B flight positions/intervals, via `fetch-opensky` | Anonymous: 10 req/min, states only; free registration at https://openskynetwork.org/ for higher limits and flights endpoint; no key needed for basic states |
 | Local JSON | Institutions, authorities, auditors, owners, relationships, accounting metrics and filing references | User supplies evidence and data; ingestion does not independently verify claims |
+| Local OHLC export | Price history for a listed equity or exchange-traded commodity, via `import-history` | User supplies an export from a source they may use; no network call, no field verified, `rights_verified` always false, `adjustment` basis required. Not wired to a provider on purpose — see below |
 
 Use `lele --json sources` to see actual endpoints and coverage. Requests are bounded to 1–1000 input records and at most ten pages. Results report pages, counts, warnings and truncation. Results are bounded and not a snapshot guarantee; small feeds can be exhausted when `truncated` is false and counts match the reported total. This does not establish complete jurisdiction coverage. `stored` counts processed institution upserts, excluding auxiliary regulator entities. Cross-source duplicates are deliberately not auto-merged. OSFI has no stable institution ID: its keys hash normalized name/type/group/industry, not CKAN row IDs; renamed or reclassified records require reconciliation.
 
-No bundled speculative bank list, automatic global regulator discovery, news crawling, comprehensive market-price coverage, sanctions matching, trading or brokerage integration is implemented. Source availability and terms can change.
+No bundled speculative bank list, automatic global regulator discovery, news crawling, comprehensive market-price coverage, sanctions matching, trading or brokerage integration is implemented. Source availability and terms can change. **Market-price coverage outside Binance spot is not implemented as a fetch**: no free, keyless daily OHLC source with terms that permit automated use was found, Yahoo is recorded as unsupported, Stooq is behind a browser-verification challenge that is not ours to defeat, and the keyed providers are blocked until a real key exists. `import-history` takes the export from you instead; that is a deliberate exclusion, not an oversight.
 ## Commands
 
 Global options **precede** the command: `lele --db PATH --json COMMAND ...`.
@@ -202,6 +203,7 @@ lele tree 1 --depth 3 --direction both
 lele countries
 lele stats
 lele import institutions.json
+lele import-history 42 aapl-daily.json --interval 1d
 lele runs --limit 50
 lele backup backups/registry.db
 lele resolve candidates
@@ -408,6 +410,93 @@ SEC ratios require matching end dates, filing accessions and forms, plus consist
 
 Selection remains bounded to one latest observation per canonical metric, considering both supported revenue tags, latest `(end,filed)`, earliest valid duration start, tag priority and deterministic tie-breaking. This does not retain every historical observation or find an alternative common filing when independently selected facts disagree. There is still no IFRS mapping, full reporting-scope reconciliation or money-transfer graph.
 
+## User-supplied price history for a non-Binance instrument
+
+`fetch-history` stores years of Binance spot klines and nothing else, so a listed
+equity or an exchange-traded commodity has no bars and therefore **no measured
+window**: `explain` could report an issuer's SEC filings, insider trades and
+holdings while having no price to measure any of them against. That was the
+largest remaining gap in the tool.
+
+It is a data gap, and it cannot be closed by picking a provider here:
+
+| Candidate | Why it is not wired |
+| --- | --- |
+| Yahoo chart API | Already recorded in this project's own source inventory as unsupported and license-unclear. Not cleared for stored history. |
+| Stooq | Free and keyless, but observed on 2026-09-29 answering **every** request, including the plain CSV download, with a JavaScript proof-of-work browser check whose `/__verify` step exists to keep non-browser clients out. Passing it is defeating an access control, so it is recorded as blocked rather than integrated. |
+| Alpha Vantage, FMP, Polygon, Twelve Data, EODHD, Nasdaq Data Link | Terms are clear, but each requires an API key. This project treats a key as blocked until a real one exists (the same rule that leaves FEC and FRED unwired). Never invent a contact address to obtain one. |
+| Exchange and vendor feeds (CME, ICE, LBMA, licensed vendors) | Correct data, licensed and paid. Not something to scrape around. |
+
+So the provider is you. `import-history` stores a bounded OHLC export you took
+from a source you have the right to use:
+
+```bash
+lele import-history 42 aapl-daily.json --interval 1d
+lele moves 42 --interval 1d --move-hours 24 --thresholds 3 5 7 11
+lele explain 42 --from 2026-09-01T00:00:00Z --to 2026-09-08T00:00:00Z
+```
+
+The format, with `Date`-style fields you would map from a CSV or a broker export:
+
+```json
+{
+  "instrument": {
+    "symbol": "AAPL",
+    "venue": "NASDAQ",
+    "currency": "USD",
+    "asset_class": "equity",
+    "adjustment": "unadjusted",
+    "rights_basis": "my subscription, research use"
+  },
+  "source": "my-broker",
+  "source_url": "local:broker-export-2026-09-28",
+  "retrieved_at": "2026-09-28T12:00:00+00:00",
+  "bars": [
+    {"open_time": "2026-09-25T13:30:00Z", "close_time": "2026-09-26T20:00:00Z",
+     "open": "224.50", "high": "226.10", "low": "223.90", "close": "225.80",
+     "volume": "41200000"}
+  ]
+}
+```
+
+What it guarantees, each asserted by `tests/test_price_import.py`:
+
+- **Validated before anything is written.** One bad row means the file stores
+  nothing, rather than storing a silently short series. The bad-row tests put the
+  defect in the *last* bar, so a validator that only checked the opening rows
+  would still fail them.
+- **Idempotent, and unambiguous.** Rows are keyed on `(instrument, interval, open
+  time)` as `fetch-history` does, and every timestamp is canonicalized to UTC
+  first — so one session written as `09:30-05:00` and as `14:30Z` is one bar, not
+  two. Re-running refines; it does not duplicate.
+- **Adjustment basis is required, not guessed.** A split repairs nothing and
+  silently corrupts every return that crosses it, so `adjustment` must be stated
+  as `adjusted`, `unadjusted` or `unknown`, and `unknown` is reported as a known
+  unknown rather than assumed away.
+- **Absence is reported as absence.** A `venue`, `asset_class` or `rights_basis`
+  the file omits appears in `unknowns` and is stored as `unknown`. A symbol is
+  never used to guess a venue, a currency or an asset class.
+- **Cadence is measured, not assumed.** An equity's daily bars are not one day
+  apart throughout: weekends and holidays make the spacing alternate between one
+  day and three. The report gives the measured dominant spacing and the number of
+  holes, so `moves` can exclude a window that spans one instead of silently
+  calling it a 24-hour move.
+- **No network call is made, and nothing is verified.** The module cannot reach
+  the network, and a test asserts that it holds no client. `rights_verified` is
+  `false` whatever the file claims: the report records the export's own claims.
+- **A bar that has not closed is refused.** `close_time` in the future is not a
+  measurement. If `close_time` is omitted it is derived from `open_time` plus the
+  interval, and each stored row records that it was derived.
+- **No accuracy claim.** Imported bars are stored with an `ingest_runs` row
+  (source, counts and a records hash), so provider health monitoring can see them
+  later like any other source.
+
+Two limits are inherent rather than fixed. `price_bars` has no unknown-volume
+representation, so a provider that reports no volume must be given one
+explicitly. And a `1d` interval is a label, not a session: `moves --move-hours 24`
+on equity daily bars measures a one-session return, and any window spanning a
+weekend or holiday is excluded and counted, not reported as a 24-hour move.
+
 ## Bounded five-minute price export (P01)
 
 `fetch-prices ID SOURCE SYMBOL --output PATH [--limit 288] [--end ISO8601] [--force]` fetches one instrument for an **existing local entity ID**. Live observation, 2026-09-17: Binance BTCUSDT exported 1000 five-minute closes and passed `project`/`events` round-trips; Yahoo AAPL exported 313; Yahoo futures GC=F/CL=F/RB=F initially failed a strict grid check whose live cause is documented below and is now handled explicitly. Its exact stored `key` is copied into `instrument.entity_key`; no ticker lookup, entity creation or guessed identity mapping occurs. Selecting the appropriate entity is the user's responsibility. `sources` remains the institution-source catalog; price choices are listed by `fetch-prices --help`.
@@ -572,6 +661,8 @@ lele --json scan ID --interval 4h --move-hours 24 --horizons 24 48 72
 ```
 
 **`fetch-history`** stores Binance spot OHLC bars in `price_bars`, keyed idempotently on `(instrument_key, interval_seconds, open_time)`, so a repeated run refines rather than duplicates. `--interval` is `1d`, `4h` or `1h`; `--limit` 2–5000 bars total and `--pages` 1–10 bounded backward pages of 1000 bars. Unlike `fetch-prices`, this walks years back: 4000 requested daily bars returned 3326 bars for `BTCUSDT` spanning 2017-08-17 to 2026-09-25, one skipped malformed row and one unclosed candle. Spot is quoted in USDT, not USD; bars are unadjusted provider values; a short result means the provider history start, not a complete record. Every bar keeps its `source_url` and `retrieved_at`, and each run is recorded in `ingest_runs`.
+
+**`import-history ID PATH [--interval 1d|4h|1h]`** stores a **user-supplied** OHLC export in the same `price_bars` table, keyed idempotently on `(instrument_key, interval_seconds, open_time)`, and makes no network call. It exists because `fetch-history` reaches only Binance spot pairs, so a listed equity or an exchange-traded commodity had no stored bars and therefore no measured window at all. The JSON format, the required `adjustment` basis, the UTC canonicalization that keeps one session from becoming two rows, the measured-cadence and gap reporting, and the exclusions for providers whose terms do not permit automated use are all documented under **User-supplied price history for a non-Binance instrument**. Every run is recorded in `ingest_runs` with a records hash, so provider health monitoring can see imported series like any other source. Nothing in the file is verified and `rights_verified` is always false.
 
 **`moves`** turns stored bars into tiered move events over a ladder of absolute percentage thresholds, `--thresholds 3 5 7 11` by default. A candidate is a fixed-horizon return between bar closes; candidates are ranked by absolute change and retained only when their windows share no bar, so a fall is not counted once per bar. Each retained move carries a `z_score` and `baseline_percentile` computed against the `--baseline-bars` returns **strictly before** its own window, never including itself.
 

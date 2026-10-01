@@ -29,27 +29,49 @@ changed.** The findings that matter for planning:
 
 **The next queue, in order.**
 
-1. **Add a non-Binance price history source.** `fetch-history` is Binance-only,
-   so `explain` can report a listed equity's SEC filings, insider trades and
-   holdings but has no bars to measure a window against. This is the single
-   largest gap for the question the tool is asked most, and it is a data
-   question: a reachable, permitted, bounded daily OHLC source for equities and
-   an exchange-traded commodity.
-2. **Re-establish the M04/M05 enrichment results on the corrected detector.** The
+1. **Re-establish the M04/M05 enrichment results on the corrected detector.** The
    recorded negative finding — that stablecoin supply and the fear and greed
    index carry no discriminative power — is the most valuable result in the
    project, and it was produced by code that could mis-measure a window. Until
    it is re-run on the fixed detector it should be treated as provisional.
-3. **Prune `price_bars` and `move_events`.** Both grow without bound. Irrelevant
+2. **Prune `price_bars` and `move_events`.** Both grow without bound. Irrelevant
    for daily bars on one instrument; not for five-minute bars on many.
-4. **Provider health monitoring.** `ingest_runs` already records a request hash
+3. **Provider health monitoring.** `ingest_runs` already records a request hash
    and a record hash per run. Nothing consumes them. A source that starts
    returning garbage is currently noticed only by a human reading a report.
-5. **Finish the type annotations.** The gate prevents the debt growing in the
+4. **Finish the type annotations.** The gate prevents the debt growing in the
    foundation; it does not repay it in the historical modules. 542 functions
    still carry no annotation and their bodies are the only thing checked.
-6. **The rest of the standing queue below**, unchanged: P09 prospective
+5. **The rest of the standing queue below**, unchanged: P09 prospective
    evaluation across all four required classes, and the M01–M05 line.
+
+**Item 1 of the previous queue is closed, and not by fetching anything.** The
+non-Binance price history gap was a usage-rights problem, not a code one:
+
+- `import-history ID PATH [--interval]` stores a bounded, user-supplied OHLC
+  export in `price_bars`, so a listed equity or exchange-traded commodity has
+  bars and therefore a measured window. 33 offline tests, and the CLI test
+  measures a real imported equity through `moves`. Adjustment basis is required,
+  timestamps are canonicalized to UTC before the idempotency key is taken,
+  cadence and holes are measured rather than assumed from the interval label, and
+  the report states that nothing in the file is verified.
+- No provider was wired. Yahoo is already recorded here as unsupported; Stooq was
+  probed on 2026-09-28 and answers every request, including the plain CSV
+  download, with a JavaScript proof-of-work browser check whose `/__verify` step
+  is there to keep non-browser clients out, so it is blocked rather than defeated;
+  the keyed providers stay blocked until a real key exists. This is a documented
+  exclusion, in README and `AUDIT.md` §8.
+- The largest remaining gap is therefore narrower than it was: the *code* half is
+  closed, and the *data* half needs a licensed source or a user export. No
+  engineering removes it.
+
+**Two gate defects were found and fixed while doing that**, both in the class the
+audit already recorded once. `.tools/check.sh` ran `compileall -q finworld`, a
+directory the rename had deleted; `compileall` prints `Can't list` and exits 0, so
+the bytecode step had been a silent no-op reporting success since the rename.
+And `.tools/` was gitignored, so the one command that decides whether the tree is
+shippable existed only on the machine that wrote it. Both are fixed, and
+`tests/test_gate.py` (6 tests) fails if either recurs.
 
 Session memory is not durable. These files survive context loss only while this
 workspace is retained. Git records code history, not the research databases or
