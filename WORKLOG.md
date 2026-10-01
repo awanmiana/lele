@@ -94,18 +94,12 @@ Stooq or Yahoo access controls, emit a buy/sell/hold signal, or ship an in-sampl
 performance figure without an out-of-sample protocol and a cost model. The evidence
 against each is in `AUDIT.md` §11.
 
-**Dirty files, uncommitted, nothing staged or pushed:** `AUDIT.md`,
-`DEVELOPMENT_PLAN.md`, `README.md`, `WORKLOG.md`, `lele/analysis/causes.py`,
-`lele/analysis/framework_notes.py` (new), `lele/analysis/moves.py`,
-`lele/analysis/projection.py`, `lele/analysis/prospective.py`, `lele/analysis/rag.py`,
-`lele/analysis/timeline.py`, `lele/analysis/volatility.py` (new),
-`lele/cli/main.py`, `lele/core/constants.py`, `lele/core/db.py`,
-`lele/core/registry.py`, `lele/core/schema.py`, `tests/test_cli.py`,
-`tests/test_db_guarantees.py`, `tests/test_enrichment.py`,
-`tests/test_framework_notes.py` (new), `tests/test_instruments.py` (new),
-`tests/test_packaging.py`, `tests/test_price_causes.py`, `tests/test_projection.py`,
-`tests/test_pipeline_integration.py`, `tests/test_rag.py`, `tests/test_volatility.py`
-(new).
+**Committed and pushed.** `e246ea3` on `master`, 28 files, 3709 insertions, 161
+deletions; local HEAD and `origin/master` verified identical. Working tree clean
+apart from one untracked harness artifact, `session-ses_f08b.md`, which is a
+transcript written by the tooling rather than part of this project; it was
+deliberately left out of the commit and is not in `.gitignore`, so do not commit it
+by accident.
 
 ---
 
