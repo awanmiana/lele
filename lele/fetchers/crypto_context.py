@@ -26,6 +26,12 @@ MAX_SENTIMENT_DAYS = 3650
 MAX_STABLECOIN_DAYS = 4000
 MAX_ACTIVITY_DAYS = 365
 COINS = ("bitcoin", "ethereum", "tether", "gold", "pax-gold")
+#: Run-history source labels. Each is used by both the failure registration and the
+#: success row, so a failure of one of these fetches lands in the same series as its
+#: successes rather than in a series of its own.
+SENTIMENT_SOURCE = "crypto-fear-greed"
+STABLECOIN_SOURCE = "crypto-stablecoin-supply"
+ACTIVITY_SOURCE = "crypto-market-activity"
 MARKET_ACTIVITY = "market_activity_v1"
 DAILY_SECONDS = 86400
 FEAR_GREED = "crypto_fear_greed_v1"
@@ -134,6 +140,8 @@ def fetch_sentiment(conn, limit=365, end=None):
     """Daily crypto fear and greed index as `social_sentiment` observations."""
     started = _now()
     finish = validate_sentiment(limit, end, started)
+    registry.record_failures(conn, source=SENTIMENT_SOURCE, started=started,
+                             query=f"limit:{limit} end:{finish.date() if finish else 'latest'}")
     query = {"limit": str(limit), "format": "json"}
     if finish is not None:
         query["start"] = str(int((finish - timedelta(days=limit + 2)).timestamp()))
@@ -204,6 +212,16 @@ def fetch_sentiment(conn, limit=365, end=None):
             "No accuracy, calibration or trading claim is made.",
         ],
     }
+    registry.clear_failure_recorder(conn)
+    registry.record_ingest_run(
+        conn, SENTIMENT_SOURCE, started.isoformat(), _now().isoformat(),
+        query=f"limit:{limit} end:{finish.date() if finish else 'latest'}",
+        fetched=len(rows), stored=stored, skipped=sum(skipped.values()), pages=1,
+        total=len(observations), truncated=False,
+        request_sha256=hashlib.sha256(url.encode("utf-8")).hexdigest(),
+        records_sha256=report["response_sha256"],
+        warnings=report["warnings"],
+        coverage="daily crypto fear and greed index, market-wide, provider aggregate")
     return {"observations": observations}, report
 
 
@@ -272,6 +290,8 @@ def fetch_stablecoin_supply(conn, limit=1200, end=None):
     """Daily aggregate stablecoin supply as market-wide supply observations."""
     started = _now()
     finish = validate_stablecoins(limit, end, started)
+    registry.record_failures(conn, source=STABLECOIN_SOURCE, started=started,
+                             query=f"limit:{limit} end:{finish.date() if finish else 'latest'}")
     url = SOURCES["DEFILLAMA_STABLECOINS"] + "/stablecoincharts/all"
     client = HTTPClient(ttl=0, max_bytes=MAX_BYTES)
     client.cache_dir = None
@@ -358,6 +378,16 @@ def fetch_stablecoin_supply(conn, limit=1200, end=None):
             "No accuracy, calibration or trading claim is made.",
         ],
     }
+    registry.clear_failure_recorder(conn)
+    registry.record_ingest_run(
+        conn, STABLECOIN_SOURCE, started.isoformat(), _now().isoformat(),
+        query=f"limit:{limit} end:{finish.date() if finish else 'latest'}",
+        fetched=len(rows), stored=stored, skipped=sum(skipped.values()), pages=1,
+        total=len(observations), truncated=False,
+        request_sha256=hashlib.sha256(url.encode("utf-8")).hexdigest(),
+        records_sha256=report["response_sha256"],
+        warnings=report["warnings"],
+        coverage="daily aggregate stablecoin supply, market-wide, provider aggregate")
     return {"observations": observations}, report
 
 
@@ -395,6 +425,8 @@ def fetch_market_activity(conn, entity_id, instrument_key, coin="bitcoin", days=
     """
     validate_activity(coin, days, entity_id, instrument_key)
     started = _now()
+    registry.record_failures(conn, source=ACTIVITY_SOURCE, started=started,
+                             query=instrument_key, indicator=coin)
     url = (f"{SOURCES['COINGECKO']}/coins/{coin}/market_chart?"
            + urlencode({"vs_currency": "usd", "days": str(days), "interval": "daily"}))
     client = HTTPClient(ttl=0, max_bytes=MAX_BYTES)
@@ -504,6 +536,17 @@ def fetch_market_activity(conn, entity_id, instrument_key, coin="bitcoin", days=
             "No accuracy, calibration or trading claim is made.",
         ],
     }
+    registry.clear_failure_recorder(conn)
+    registry.record_ingest_run(
+        conn, ACTIVITY_SOURCE, started.isoformat(), _now().isoformat(),
+        query=instrument_key, indicator=coin,
+        fetched=len(moments), stored=stored, skipped=sum(skipped.values()), pages=1,
+        total=len(observations), truncated=False,
+        request_sha256=hashlib.sha256(url.encode("utf-8")).hexdigest(),
+        records_sha256=report["response_sha256"],
+        warnings=report["warnings"],
+        coverage=f"daily {coin} market activity for {instrument_key}; a market-cap proxy, "
+                 "not a net flow")
     return {"observations": observations}, report
 
 

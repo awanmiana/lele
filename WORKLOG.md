@@ -1,5 +1,83 @@
 # Lele Worklog
 
+## Current handoff — every command that writes rows now records both outcomes, and the last list was two claims (user-directed; resume here)
+
+**The §18 gap is closed. 1066 tests, gate green.** Five commands wrote rows while
+recording nothing at all; all five record now. **Every command that writes to the
+registry records a completed run and a failed one.**
+
+**Added.** `crypto_context.py` got run rows for all three of its fetchers, each keyed
+by its own module constant so the failure and the success land in the same series:
+`crypto-fear-greed` and `crypto-stablecoin-supply` market-wide with
+`limit:N end:YYYY-MM-DD`, `crypto-market-activity` per instrument with the coin as the
+indicator. `store-evidence` records in the CLI handler that persists the document,
+with the source and symbol as its query so it sits beside the export it came from.
+
+**A stronger record than the rest of the table holds, and I am not smoothing it over.**
+The other 22 recording sites hash *counts* into `records_sha256` — which is why §16
+found no content fingerprint anywhere. These three already computed a `response_sha256`
+over the provider payload and were **not storing it anywhere**; it is stored now. So
+for these three a content change is detectable and `no_record_hash` correctly stops
+firing, and the column now means two different things depending on the fetcher.
+`provider_health` publishes `records_hashed_runs` per series so a reader can see which
+is which. Unifying it is a migration and a separate decision; I did not take it here.
+
+Measured on a temporary registry with the provider call stubbed: one successful fetch
+→ `('crypto-fear-greed', 'completed', 3, 1, 'b6386d827af7')` and **no flags at all**;
+one failing fetch → `('crypto-fear-greed', 'failed', 'source_request: SourceError')`
+beside it, same series, secret absent from every column.
+
+**A defect in the same function.** `_store_evidence` raised
+`CLIError(f"evidence fetch failed; nothing stored: {error}")` — the exception's message,
+printed. `main` replaces every other exception's message for the reason §3G1 gives, and
+this one route around it was not covered by the secret-leak test. Now classified
+through `registry.classify_failure`: the console names the kind and the class, not the
+text.
+
+**The list §18 published was two claims wearing one name.** Split by what the code
+does: *writes rows, records nothing* (a real gap — the rollback discarded the evidence
+that anything happened) versus *writes no rows at all* (not a gap: `fetch-prices`,
+`fetch-evidence`, `fetch-cot`, `fetch-short` read through `read_connect` and write a
+document to a file, so there is no transaction to roll back). The second list became
+`EXPORT_ONLY_COMMANDS`, four names, and the report says why each is absent rather than
+implying coverage. **The claim is machine-checked against the routing**: a test parses
+`_dispatch`, and for each name requires the branch to exist, to contain no
+`registry.get_conn(`, and to open a read-only session or write the export it is named
+for. A command that starts writing rows while sitting in that list now fails a test
+instead of quietly becoming invisible.
+
+**Three bugs of my own on the way**, all in the edits rather than the design. A python
+`replace(..., 1)` on a repeated marker put the stablecoin run row inside
+`fetch_sentiment` — the file had two `record_ingest_run` calls in one function and
+none in the other, and the grep count is what caught it. A second script slice
+truncated a test file to three lines, which `git checkout` restored from the last
+commit and I then redid by hand. And the AST extractor for the dispatch branches took
+four attempts: `left` is a `Name`, not a `Constant`, so the command names are on the
+*right* of the comparison.
+
+**Verified.** `.tools/check.sh` unpiped, redirected to a file: 1066 tests, import,
+compileall, ruff on package and tests, mypy over 62 files, the connection guarantee
+under `ResourceWarning` as an error. Recorded in `AUDIT.md` §19.
+
+**Precise next task.** There is no longer a gap in run recording. What remains, in
+order: the type annotations (measured 2026-10-03: **612 of 743** functions in `lele/`
+still lack a complete signature), keyless non-Binance ingestion, the persistent
+watchlist, and the HAR-log forecasting half. A smaller and more useful one first:
+**unify what `records_sha256` means** — either migrate the 22 count hashes to a
+content hash where the fetcher has one, or rename the column and document that it is a
+count hash. Right now the same field means two things and only `records_hashed_runs`
+tells a reader which.
+
+**Do not** lower the 0.9 constant, invent a contact email or API key, defeat the
+Stooq or Yahoo access controls, emit a buy/sell/hold signal, or ship an in-sample
+performance figure without an out-of-sample protocol and a cost model. The evidence
+against each is in `AUDIT.md` §11.
+
+**Do not** commit `session-ses_f08b.md`: it is a tooling transcript, untracked and
+not gitignored, and it is not part of this project.
+
+---
+
 ## Current handoff — every fetcher that records a success records a failure, and the handoff's reason for deferring sanctions was wrong (user-directed; resume here)
 
 **§17's adoption gap is closed. 1066 tests, gate green.** Twenty-three recording

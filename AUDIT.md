@@ -1528,3 +1528,89 @@ list rather than two.
 - A failure recorded after a rollback says the fetch did not complete. It does not
   say how much of it had already been stored before the rollback, because those rows
   are gone — only the counts on the *successful* rows ever recorded survive.
+
+## 19. The last five sources, and a list that turned out to be two different claims
+
+§18 left eight commands writing rows while recording no run at all, and called five
+of them "a real gap — a success is invisible there too". This closes that, and the
+interesting finding is that the list was not one claim.
+
+### 19.1 What was added
+
+`fetchers/crypto_context.py` had three fetchers writing `observations` and recording
+nothing. Each now registers its failure recorder with its own module constant and
+writes a run row beside its observations:
+
+| command | run source | series key |
+| --- | --- | --- |
+| `fetch-sentiment` | `crypto-fear-greed` | `limit:N end:YYYY-MM-DD` |
+| `fetch-stablecoins` | `crypto-stablecoin-supply` | `limit:N end:YYYY-MM-DD` |
+| `fetch-market-activity` | `crypto-market-activity` | `instrument_key`, `indicator` = coin |
+
+`store-evidence` records too, in the CLI handler that persists the document, with the
+source and symbol as its query so it sits beside the `fetch-evidence` export it came
+from. The three crypto-context commands are now in the adopted family that §18's
+`ast` test covers, so nothing about their adoption is asserted by hand.
+
+### 19.2 A stronger record than the rest of the table holds
+
+The other 22 recording sites hash *counts* into `records_sha256`, which is why §16
+found no content fingerprint anywhere. These three already computed a
+`response_sha256` over the provider payload and were **not storing it anywhere**. It
+is now stored, so for `crypto-fear-greed`, `crypto-stablecoin-supply` and
+`crypto-market-activity` a content change is detectable and `provider_health`'s
+`no_record_hash` flag correctly stops firing for them.
+
+That is not a uniformity win — the column now means two different things depending on
+the fetcher — and it is recorded here as a finding rather than smoothed over. The
+honest fix is a migration and a documented convention, which is a separate decision;
+until then `provider_health` reports `records_hashed_runs` per series, so a reader can
+see which is which.
+
+Measured, on a temporary registry with the provider call stubbed: one successful fetch
+gives `('crypto-fear-greed', 'completed', 3, 1, 'b6386d827af7')` and **no flags** at
+all; one failing fetch gives `('crypto-fear-greed', 'failed', 'source_request:
+SourceError')` beside it, in the same series, with the secret absent from every
+column.
+
+### 19.3 A defect found in the same function: an exception message echoed to the console
+
+`_store_evidence` caught `(SourceError, ValueError)` and raised
+`CLIError(f"evidence fetch failed; nothing stored: {error}")` — the exception's own
+message, printed. `main` replaces every other exception's message for exactly the
+reason §3G1 gives, and this one route around it was not covered by
+`test_errors_do_not_leak_exception_secrets`. It is now classified through
+`registry.classify_failure` like every other failure, so the console names the *kind*
+and the class and not the text.
+
+### 19.4 The list was two claims, and only one was a gap
+
+§18 published `NO_RUN_HISTORY` with eight names and called five of them a gap. Splitting
+them by what the code actually does shows they were never the same claim:
+
+- **Writes rows, records nothing** — a gap, because the rollback discarded the
+  evidence that anything happened: `fetch-sentiment`, `fetch-stablecoins`,
+  `fetch-market-activity`, `store-evidence`. **Closed by §19.1.**
+- **Writes no rows at all** — not a gap: `fetch-prices`, `fetch-evidence`, `fetch-cot`,
+  `fetch-short` read the registry through `read_connect` and write a document to a
+  file. There is no transaction to roll back and no row to record.
+
+So the list became `EXPORT_ONLY_COMMANDS`, four names, and the report now says why each
+one is absent rather than implying coverage. **The claim is machine-checked against the
+routing**: a test parses `_dispatch`, and for each name requires the branch to exist,
+to contain no `registry.get_conn(`, and to open a read-only session or write the export
+it is named for. A command that starts writing rows while sitting in that list now
+fails a test instead of quietly becoming invisible.
+
+Every command that writes rows to the registry now records a completed run and a
+failed one. That is a real end state rather than a shorter list of exceptions.
+
+### 19.5 What this does not establish
+
+- A content hash for three sources is not a content hash for the other twenty-two. The
+  column means two things and the audit says so; a migration is a separate decision.
+- Recording a run for the crypto context says nothing about whether the index or the
+  supply series is *right*. Both remain provider aggregates (§14).
+- `EXPORT_ONLY_COMMANDS` being absent from the report is not a health claim. A command
+  that writes a file and stores nothing cannot fail in a way that leaves a hole in the
+  registry, which is a property of the code and not a judgement about the provider.

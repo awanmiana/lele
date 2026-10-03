@@ -102,9 +102,21 @@ stored anything holds the write lock; the design that works has the transaction
 owner roll back first and then commit the recorder's rows. See `AUDIT.md` §17.
 
 **Failure recording was adopted across the whole fetcher family on 2026-10-03**,
-which closed the §17 gap and found the handoff's reason for deferring sanctions to
-be wrong. Eight commands still record no run at all and are named in the report;
-five of them are a real remaining gap. See `AUDIT.md` §18.
+which closed the §17 gap and found the handoff's reason for deferring sanctions to be
+wrong (§18). The five remaining sources that recorded nothing at all were closed the
+same day (§19): **every command that writes rows to the registry now records a
+completed run and a failed one**, and the only commands absent from the run history are
+the four that write a document to a file and read the registry read-only —
+`provider_health.EXPORT_ONLY_COMMANDS`, machine-checked against the routing in
+`_dispatch` so a command that starts writing cannot sit in that list unnoticed.
+
+Also in §19: the three crypto-context sources store the `response_sha256` they already
+computed and never persisted, so for those three a content change is detectable from
+the run table where the other 22 recording sites hold only a count hash. That
+inconsistency is recorded rather than smoothed over, and unifying it is a migration
+and a separate decision. One defect fell out of the same function — `store-evidence`
+echoed an exception's message to the console, the one route around the rule that a
+classified message replaces the raw one.
 
 **The next queue, in order.** Items 1, 1a, the capability summary, 2 and 3 are
 closed above, as is failed-run recording across the fetcher family; the rest are

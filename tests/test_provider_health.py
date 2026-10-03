@@ -1,3 +1,4 @@
+import ast
 """Offline tests for provider health: what the recorded runs can say, and what they cannot.
 
 The failure modes these pin are the ones this project keeps finding in its own
@@ -12,7 +13,9 @@ import json
 import os
 import tempfile
 import unittest
+import inspect
 from contextlib import redirect_stdout
+from pathlib import Path
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -132,6 +135,39 @@ class WhatIsRecorded(RegistryCase):
         self.assertEqual(report["series"][0]["fetched"]["last"], 100)
 
 
+def _dispatch_branches() -> dict:
+    """The text of each `if command == "x"` branch inside `_dispatch`.
+
+    Read from the source rather than kept beside it, because a list of commands and
+    the routing that decides what they do are the two things that must not disagree.
+    """
+    from lele.cli.main import _dispatch
+    tree = ast.parse(Path(inspect.getsourcefile(_dispatch)).read_text(encoding="utf-8"))
+    bodies: dict = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+            continue
+        # `_dispatch` routes as `if command == "x"` or `if command in ("x", "y")`, so
+        # the names are whichever side of the comparison is not the variable.
+        sides = [node.test.left, *node.test.comparators]
+        if not [side for side in sides if isinstance(side, ast.Name) and side.id == "command"]:
+            continue
+        other = sides[1] if isinstance(sides[0], ast.Name) else sides[0]
+        if isinstance(other, ast.Constant) and isinstance(other.value, str):
+            names = [other.value]
+        elif isinstance(other, ast.Tuple):
+            names = [item.value for item in other.elts
+                     if isinstance(item, ast.Constant) and isinstance(item.value, str)]
+        else:
+            continue
+        if not all(name.startswith(("fetch", "store")) for name in names):
+            continue
+        text = "\n".join(ast.unparse(statement) for statement in node.body)
+        for name in names:
+            bodies.setdefault(name, []).append(text)
+    return bodies
+
+
 class Flags(RegistryCase):
 
     def names(self, **kwargs):
@@ -153,13 +189,32 @@ class Flags(RegistryCase):
         self.assertNotIn("SECRET", json.dumps(series))
         self.assertNotIn("SECRET", json.dumps(entry["reasons"]))
 
-    def test_every_no_run_history_command_is_a_real_fetch_or_store_command(self):
-        """The gap list is machine-checked: a name that is not a command, or that no
-        longer exists, would describe a coverage this project does not have."""
+    def test_every_export_only_command_really_opens_the_registry_read_only(self):
+        """The claim is "writes no rows", so it is checked against the routing.
+
+        A name in this list that opened a write session would be a command whose
+        failures are invisible here while the report says it has nothing to record:
+        exactly the false claim this project keeps finding. Parsed from `_dispatch`,
+        so the list cannot drift from the code it describes.
+        """
         from lele.cli.main import COMMANDS
-        self.assertEqual(set(provider_health.NO_RUN_HISTORY) - set(COMMANDS), set())
-        for command in provider_health.NO_RUN_HISTORY:
-            self.assertTrue(command.startswith(("fetch", "store")), command)
+        self.assertEqual(set(provider_health.EXPORT_ONLY_COMMANDS) - set(COMMANDS), set())
+        branches = _dispatch_branches()
+        self.assertTrue(branches, "no fetch command branch was found to check")
+        for command in provider_health.EXPORT_ONLY_COMMANDS:
+            with self.subTest(command=command):
+                text = "\n".join(branches.get(command, []))
+                self.assertTrue(text, f"{command} has no dispatch branch to check")
+                self.assertNotIn("registry.get_conn(", text,
+                                 f"{command} opens a read-write session, so it has rows to "
+                                 "record and does not belong in EXPORT_ONLY_COMMANDS")
+                # The session is opened either in the branch or by the read-only export
+                # path around it, so what is checked is that the branch neither writes
+                # nor reaches for a write handle, and that it writes the document it is
+                # named for.
+                self.assertTrue("registry.read_connect(" in text or "_export(" in text,
+                                f"{command} neither opens a read-only session nor writes the "
+                                "export it is named for")
         self.assertIn("also records a failed one", provider_health.FAILURE_RECORDING)
 
     def test_a_changed_recorded_request_stops_the_comparison_being_made(self):
@@ -327,7 +382,7 @@ class WhatItRefusesToSay(RegistryCase):
         report = self.report()
         joined = " ".join(report["what_this_is_not"]).lower()
         self.assertIn("a failed run is recorded with a classified reason", joined)
-        self.assertIn("no_run_history", joined)
+        self.assertIn("export_only_commands", joined)
         self.assertIn("absence of a new run is still not evidence that a source works", joined)
         self.assertIn("no run records a hash of the records themselves", joined)
         self.assertEqual(report["what_this_is_not"], list(provider_health.NOT_A_CHECK))

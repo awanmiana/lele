@@ -981,13 +981,9 @@ A failure is recorded as `status: failed` with the request identity and query sc
 
 **Every fetcher that records a success records a failure.** Form 4, 13F, N-PORT, USAspending, LDA, Treasury, EIA, BLS, OpenSky, sanctions, Comtrade, Census, Federal Register, Form ADV, price history and `import-history` all register the same recorder their success row sits beside, so a failure lands in the same series as that source's successes. The coverage claim is a test over the source rather than a list of adopting commands: every module that calls `record_ingest_run` must also call `record_failures` **and** `clear_failure_recorder`, checked with `ast`.
 
-**Eight commands still record no run at all**, named in `provider_health.NO_RUN_HISTORY`, printed in the report and quoted by `lele summary`:
+**Every command that writes rows to the registry records a completed run and a failed one** — including `fetch-sentiment`, `fetch-stablecoins`, `fetch-market-activity` and `store-evidence`, which until now recorded nothing at all, so a *success* of theirs was invisible too. The three crypto-context sources also store the response hash they already computed and never persisted, so for those three a content change is detectable from the run table where it is not for the others.
 
-| command | why |
-| --- | --- |
-| `fetch-sentiment`, `fetch-stablecoins`, `fetch-market-activity` | write observations, record no run — a real gap: a *success* is invisible too |
-| `store-evidence`, `fetch-evidence` | write through the observation bridge, record no run — same |
-| `fetch-prices`, `fetch-cot`, `fetch-short` | write an export file and never touch the registry, so there is nothing to roll back |
+**Four commands are absent from the run history, and the reason is a property of the code rather than an omission:** `fetch-prices`, `fetch-evidence`, `fetch-cot` and `fetch-short` read the registry through `read_connect` and write a document to a file. There is no transaction to roll back and no row to record. They are named in `provider_health.EXPORT_ONLY_COMMANDS`, printed in the report and quoted by `lele summary`, and **machine-checked against the routing**: a test parses the dispatch branches in `_dispatch` and fails if one of them ever opens a write session.
 
 `AUDIT.md` §17 has the design and the two that could not work; §18 has the family adoption, two bugs a script wrote on the way, and the fact that the previous handoff's reason for deferring sanctions was simply wrong.
 

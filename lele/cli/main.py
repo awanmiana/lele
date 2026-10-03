@@ -1622,15 +1622,35 @@ def _store_evidence(args):
         raise CLIError("--max-rows must not exceed 20000", 2)
     with registry.get_conn(args.db) as conn:
         entity = _instrument(conn, args)
+        started = clock.now().isoformat()
+        # Registered after the argument check and before the request, so a failure is
+        # recorded and a refused argument is not a run. Cleared below once the rows
+        # are stored, so a later failure in this session is not attributed to this.
+        registry.record_failures(
+            conn, source="store-evidence", started=started,
+            query=f"{args.source}:{args.symbol}")
         try:
             payload, report = evidence.fetch_evidence(
                 conn, args.id, args.source, args.symbol, limit=args.limit,
                 end=args.end or None)
         except (SourceError, ValueError) as error:
-            raise CLIError(f"evidence fetch failed; nothing stored: {error}", 1) from error
+            # Classified, not echoed: a provider message can carry a response body,
+            # and `main` replaces every other exception's message for that reason.
+            raise CLIError(
+                f"evidence fetch failed; nothing stored ({registry.classify_failure(error)[0]}, "
+                f"{registry.classify_failure(error)[1]})", 1) from error
         result = evidence_store.store(
             conn, payload, entity["key"], args.id, args.source,
             retrieved_at=report.get("retrieved_at", ""), limit=args.max_rows)
+        registry.clear_failure_recorder(conn)
+        registry.record_ingest_run(
+            conn, "store-evidence", started, clock.now().isoformat(),
+            query=f"{args.source}:{args.symbol}",
+            fetched=int(result.get("read", 0) or 0), stored=int(result.get("stored", 0) or 0),
+            skipped=int(sum((result.get("skipped") or {}).values())), pages=1,
+            total=int(result.get("converted", 0) or 0), truncated=bool(result.get("truncated")),
+            coverage=f"{args.source} {args.symbol} world-state evidence stored as observations; "
+                     "only instrument-bound records are stored")
     return {"evidence": {key: report[key] for key in
                          ("source", "symbol", "retrieved_at", "source_urls", "records")
                          if key in report}, **result}

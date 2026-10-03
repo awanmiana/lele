@@ -90,22 +90,15 @@ FLAGS = (
     "stale",
 )
 
-#: Commands that write rows to the registry and record **no** run at all, so this
-#: monitor sees neither their successes nor their failures. Not a coverage claim and
-#: not a to-do list invented here: it is what is left after every module that calls
-#: `record_ingest_run` was checked to also call `record_failures`, which a test
-#: asserts over the source rather than over a list somebody maintains.
-#:
-#: The crypto context sources write `observations` and record nothing; the export
-#: commands write a file and never touch the registry, so there is nothing for them
-#: to record and a failure in them is not a rolled-back write.
-NO_RUN_HISTORY = (
-    "fetch-sentiment",
-    "fetch-stablecoins",
-    "fetch-market-activity",
-    "store-evidence",
-    "fetch-evidence",
+#: Commands that write **no rows to the registry at all**: they export a document and
+#: read the registry read-only, so there is no transaction to roll back and no row to
+#: record. Named because "records nothing" and "has nothing to record" are different
+#: claims, and only the second one is a property of the code. Every other command that
+#: writes rows records a run -- a completed one and, since the family adoption, a
+#: failed one -- and that is checked over the source rather than asserted here.
+EXPORT_ONLY_COMMANDS = (
     "fetch-prices",
+    "fetch-evidence",
     "fetch-cot",
     "fetch-short",
 )
@@ -123,10 +116,11 @@ NOT_A_CHECK = (
     "about what a source last returned to this program, which is a different thing from "
     "whether the provider is correct.",
     "A failed run is recorded with a classified reason and the exception's class name and "
-    "never its message, on the connection whose transaction has already been rolled back. "
-    "Commands writing rows while recording no run at all are named in NO_RUN_HISTORY, so this "
-    "monitor is blind to them in both directions. Absence of a new run is still not evidence "
-    "that a source works, and nothing in this report can call a source failing or healthy.",
+    "never its message, on the connection whose transaction has already been rolled back. Every "
+    "command that writes rows records both outcomes; the commands that write no rows at all are "
+    "named in EXPORT_ONLY_COMMANDS and are absent here for that reason rather than by omission. "
+    "Absence of a new run is still not evidence that a source works, and nothing in this report "
+    "can call a source failing or healthy.",
     "No run records a hash of the records themselves: 17 of 25 recording sites pass no "
     "records_sha256 and the rest hash counts and page metadata. A provider returning the "
     "same number of different records is invisible here.",
@@ -384,7 +378,7 @@ def report(conn, *, source: str = "", since_hours: int = 0,
         "collapse_threshold": str(COLLAPSE_FRACTION),
         "flags_named": list(FLAGS),
         "failure_recording": FAILURE_RECORDING,
-        "no_run_history": list(NO_RUN_HISTORY),
+        "export_only_commands": list(EXPORT_ONLY_COMMANDS),
         "what_this_is": "what the recorded ingest runs say about what each source last "
                         "returned to this program, compared only across an unchanged recorded "
                         "request",
@@ -393,10 +387,11 @@ def report(conn, *, source: str = "", since_hours: int = 0,
         "completeness_note": "a bounded run history cannot show that a source has nothing else "
                              "to report, and a source absent from it may be one this registry "
                              "never fetched",
-        "failure_recording_note": "every command whose fetcher records a completed run also "
-                                  "records a failed one. Commands that record no run at all, and "
-                                  "so are invisible to this report in both directions: "
-                                  + ", ".join(NO_RUN_HISTORY),
+        "failure_recording_note": "every command that writes rows records a completed run and a "
+                                  "failed one. Commands that write no rows at all -- they export "
+                                  "a document and read the registry read-only -- have no "
+                                  "transaction to roll back and no row to record: "
+                                  + ", ".join(EXPORT_ONLY_COMMANDS),
     }
 
 

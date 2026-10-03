@@ -191,7 +191,7 @@ def _taxonomy():
             "run_read_bound": provider_health.MAX_RUNS,
             "cannot_detect": list(provider_health.NOT_A_CHECK),
             "failure_recording": provider_health.FAILURE_RECORDING,
-            "no_run_history": list(provider_health.NO_RUN_HISTORY),
+            "export_only_commands": list(provider_health.EXPORT_ONLY_COMMANDS),
             "failure_reasons": dict(sorted(registry.FAILURE_REASONS.items())),
         },
         "retention": {
@@ -519,9 +519,9 @@ def render_markdown(report):
         + ", ".join(f"`{name}`" for name in health["failure_reasons"]) + ".",
         "",
         f"- {health['failure_recording']}",
-        "- commands writing rows while recording no run at all, invisible to this report in "
-        f"both directions: "
-        f"{', '.join(f'`{name}`' for name in health['no_run_history'])}",
+        "- commands that write no rows at all, so they have no run to record and no "
+        "transaction to roll back: "
+        f"{', '.join(f'`{name}`' for name in health['export_only_commands'])}",
         "",
         "## Allocation frameworks, recorded as citations",
         "",

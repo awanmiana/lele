@@ -202,17 +202,27 @@ class Adoption(unittest.TestCase):
                               "this fetcher")
         self.assertGreaterEqual(checked, 16, "the family is smaller than expected")
 
-    def test_the_no_run_history_list_names_real_fetch_commands_and_no_run_history_writes(self):
-        from lele.cli.main import COMMANDS
-        self.assertEqual(set(provider_health.NO_RUN_HISTORY) - set(COMMANDS), set())
-        for command in provider_health.NO_RUN_HISTORY:
-            self.assertTrue(command.startswith(("fetch", "store")), command)
-        for module in ("crypto_context.py", "evidence.py"):
-            text = (Path(__file__).resolve().parent.parent / "lele" / "fetchers" / module).read_text(
-                encoding="utf-8")
-            self.assertNotIn("record_ingest_run(", text,
-                             f"{module} now records runs, so it belongs in the recorded family "
-                             "and not in NO_RUN_HISTORY")
+    def test_the_crypto_context_and_evidence_commands_are_now_recorded(self):
+        """The five commands that recorded nothing now record both outcomes.
+
+        `crypto_context.py` gained its run rows in this round and `store-evidence`
+        its own, so neither belongs in the list of commands with nothing to record --
+        which is why the assertion is that the modules *do* record, not that they do not.
+        """
+        root = Path(__file__).resolve().parent.parent / "lele"
+        context = (root / "fetchers" / "crypto_context.py").read_text(encoding="utf-8")
+        for source in ('SENTIMENT_SOURCE = "crypto-fear-greed"',
+                       'STABLECOIN_SOURCE = "crypto-stablecoin-supply"',
+                       'ACTIVITY_SOURCE = "crypto-market-activity"'):
+            self.assertIn(source, context,
+                          "a run-history label is defined once and used by both the failure "
+                          "registration and the success row, so the two cannot drift apart")
+        self.assertEqual(context.count("registry.record_failures("), 3)
+        cli = (root / "cli" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('source="store-evidence"', cli)
+        evidence = (root / "fetchers" / "evidence.py").read_text(encoding="utf-8")
+        self.assertNotIn("record_ingest_run(", evidence,
+                         "evidence.py only exports; it must not start recording runs")
 
 class ClearingOnSuccess(FileRegistry):
     """The registry this test writes to, with somewhere to put an export file."""
@@ -332,15 +342,14 @@ class ThroughTheFetcher(FileRegistry):
         self.assertIn("recorded_failure", report["flags"])
         self.assertIn("source_request", " ".join(series["failure_reasons"]))
         self.assertIn("also records a failed one", report["failure_recording"])
-        self.assertIn("invisible to this report in both directions",
-                      report["failure_recording_note"])
-        self.assertIn("fetch-sentiment", report["no_run_history"])
+        self.assertIn("no rows at all", report["failure_recording_note"])
+        self.assertIn("fetch-cot", report["export_only_commands"])
 
     def test_a_provider_report_still_blames_no_source_for_a_command_that_records_nothing(self):
         with registry.get_read_conn(self.path) as conn:
             report = provider_health.report(conn)
         self.assertEqual(report["window"]["series"], 0)
-        self.assertIn("record no run at all", report["failure_recording_note"])
+        self.assertIn("no rows at all", report["failure_recording_note"])
 
 
 if __name__ == "__main__":
