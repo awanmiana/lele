@@ -979,7 +979,17 @@ The row is written **outside** the transaction it rolls back, which sounds like 
 
 A failure is recorded as `status: failed` with the request identity and query scope it was attempting, a reason from a closed vocabulary (`source_request`, `database`, `file`, `data`, `cancelled`, `unexpected`) and the exception's **class name**. Never its message: an exception message can carry a token or a password, and the rule that a classified message replaces the raw one applies to a database row as much as to the console. A test plants a secret in six exception types and asserts it reaches no column.
 
-**Only `fetch` records failures so far.** The `fetch-*` extractors — Form 4, 13F, N-PORT, USAspending, LDA, Treasury, EIA, OpenSky, sanctions — still leave no row, and `lele providers` says so in `failure_recording_note` rather than implying coverage. The list is `FAILURE_RECORDING_COMMANDS`, quoted by `lele summary` and checked against the command table by a test, so adopting a fetcher is a two-line change and the list is the checklist. `AUDIT.md` §17 has the design and the two that could not work.
+**Every fetcher that records a success records a failure.** Form 4, 13F, N-PORT, USAspending, LDA, Treasury, EIA, BLS, OpenSky, sanctions, Comtrade, Census, Federal Register, Form ADV, price history and `import-history` all register the same recorder their success row sits beside, so a failure lands in the same series as that source's successes. The coverage claim is a test over the source rather than a list of adopting commands: every module that calls `record_ingest_run` must also call `record_failures` **and** `clear_failure_recorder`, checked with `ast`.
+
+**Eight commands still record no run at all**, named in `provider_health.NO_RUN_HISTORY`, printed in the report and quoted by `lele summary`:
+
+| command | why |
+| --- | --- |
+| `fetch-sentiment`, `fetch-stablecoins`, `fetch-market-activity` | write observations, record no run — a real gap: a *success* is invisible too |
+| `store-evidence`, `fetch-evidence` | write through the observation bridge, record no run — same |
+| `fetch-prices`, `fetch-cot`, `fetch-short` | write an export file and never touch the registry, so there is nothing to roll back |
+
+`AUDIT.md` §17 has the design and the two that could not work; §18 has the family adoption, two bugs a script wrote on the way, and the fact that the previous handoff's reason for deferring sanctions was simply wrong.
 
 ## Provider health: what the recorded runs say (v19)
 

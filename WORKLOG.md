@@ -1,5 +1,86 @@
 # Lele Worklog
 
+## Current handoff — every fetcher that records a success records a failure, and the handoff's reason for deferring sanctions was wrong (user-directed; resume here)
+
+**§17's adoption gap is closed. 1066 tests, gate green.** Twenty-three recording
+sites in sixteen modules now register a failure recorder beside the success row they
+already wrote.
+
+**The coverage claim is a test over the source, not a list.** `FAILURE_RECORDING` is
+a sentence, and an `ast` test walks every module calling `record_ingest_run` and
+requires it to call `record_failures` **and** `clear_failure_recorder`. A list of
+twenty-four adopting commands is a list to forget; a test that fails when a new
+fetcher joins half the pair is not. Each registration uses the module's own `SOURCE`
+constant and its own scope expression, so a failure lands in the same series as that
+source's successes — the grouping is identical by construction because both rows
+reference the same locals.
+
+**Two of the twenty-three could not go where `started` is taken.** `import-history`
+learns the symbol after parsing the file, and `fetch-opensky` resolves its window
+after parsing `begin`/`end`; both registrations moved to just after the scope exists
+and before the first write, with a comment saying why.
+
+**Three bugs on the way, and the third is the one that mattered.**
+
+1. A script inserted the clear line *inside* a multi-line `record_ingest_run(` call —
+   an off-by-one on `call.lineno`. Caught by `compileall`, which is why it runs before
+   the tests.
+2. `started.lineno + started.end_lineno` as a list index is `2 × lineno` for a
+   single-line assignment, so one registration landed at the end of a file.
+3. **mypy, not a test, found the real one:** `record_failures` raised
+   `ValueError: started must be a datetime` because `sources.py` keeps `started` as
+   an ISO **string** while every other fetcher keeps a datetime. Same family as §10 —
+   the column implies a type the module does not use. Before the fix a failing
+   `lele fetch` recorded **nothing** and was reported as "invalid data or registry
+   schema": a monitoring feature doing the opposite of its purpose, silently. The
+   helper now accepts either and refuses anything that is not an aware instant.
+
+**The handoff's reason for deferring sanctions was wrong.** It said they should go
+last because "those commit on their own transaction". There is no `conn.commit()` in
+`lele/analysis/sanctions.py`; they take a write session from the CLI like every other
+command, so their work rolls back exactly as everyone else's does. Adopting them was
+the same two-line change as the rest. Recorded because a handoff's explanation is a
+claim like any other, and this one was checked only now.
+
+**What is still not covered, and it is a different gap.** Eight commands write rows
+and record **no run at all**, named in `NO_RUN_HISTORY`, printed in the report and
+quoted by `lele summary`: `fetch-sentiment`, `fetch-stablecoins`,
+`fetch-market-activity`, `store-evidence`, `fetch-evidence` — these are a real gap,
+because a *success* is invisible there too, not only a failure — and `fetch-prices`,
+`fetch-cot`, `fetch-short`, which write an export file and never touch the registry,
+so there is nothing to roll back. **That is the next task**: add `record_ingest_run`
+to `crypto_context.py` and `evidence.py`, which is new bookkeeping rather than an
+adoption, and it will make five more sources visible to `lele providers`.
+
+**Tests.** `tests/test_failed_runs.py` is now 19. The new ones: the `ast` adoption
+check (with the module name in the failure message); the clear-on-success check,
+because a recorder left registered would attribute a later failure in the same session
+to that fetcher; the gap list machine-checked against the command table with
+`crypto_context.py`/`evidence.py` asserted still to record nothing; and **a
+successful import leaving no failure recorded**, tested through `import-history` by
+failing a later operation in the same session. That last one is the test that would
+have caught the forgotten `finally` in §17.
+
+**Verified.** `.tools/check.sh` unpiped, redirected to a file: 1066 tests, import,
+compileall, ruff on package and tests, mypy over 62 files, the connection guarantee
+under `ResourceWarning` as an error. Recorded in `AUDIT.md` §18.
+
+**Precise next task.** Add run recording to `crypto_context.py` (three commands) and
+`evidence.py` (two), then remove them from `NO_RUN_HISTORY`. After that: the type
+annotations (measured 2026-10-03: **612 of 743** functions in `lele/` still lack a
+complete signature), keyless non-Binance ingestion, the persistent watchlist and the
+HAR-log forecasting half.
+
+**Do not** lower the 0.9 constant, invent a contact email or API key, defeat the
+Stooq or Yahoo access controls, emit a buy/sell/hold signal, or ship an in-sample
+performance figure without an out-of-sample protocol and a cost model. The evidence
+against each is in `AUDIT.md` §11.
+
+**Do not** commit `session-ses_f08b.md`: it is a tooling transcript, untracked and
+not gitignored, and it is not part of this project.
+
+---
+
 ## Current handoff — a failed fetch now leaves a row, after two designs that could not work (user-directed; resume here)
 
 **The §16 follow-on is closed. 1063 tests, gate green.** Recording a failed ingest

@@ -101,8 +101,14 @@ A first design used a second connection and could not work, because a fetch that
 stored anything holds the write lock; the design that works has the transaction
 owner roll back first and then commit the recorder's rows. See `AUDIT.md` §17.
 
+**Failure recording was adopted across the whole fetcher family on 2026-10-03**,
+which closed the §17 gap and found the handoff's reason for deferring sanctions to
+be wrong. Eight commands still record no run at all and are named in the report;
+five of them are a real remaining gap. See `AUDIT.md` §18.
+
 **The next queue, in order.** Items 1, 1a, the capability summary, 2 and 3 are
-closed above, as is failed-run recording; the rest are unchanged.
+closed above, as is failed-run recording across the fetcher family; the rest are
+unchanged.
 
 1. **Re-establish the M04/M05 enrichment results on the corrected detector.**
    **CLOSED 2026-10-02, recorded in `AUDIT.md` §12.** Kept in the list so the reason
@@ -171,6 +177,19 @@ closed above, as is failed-run recording; the rest are unchanged.
    machine-checked against the command table. **A first design that opened a second
    connection could not work** — a fetch that stored anything holds the write lock —
    and the test that proved it is why §17 records three designs.
+   **Adopted across the whole family 2026-10-03** (`AUDIT.md` §18): 23 recording
+   sites in 16 modules, each registering its recorder with the same `SOURCE`
+   constant and the same scope expression its success row uses, so a failure lands in
+   the same series as that source's successes. The coverage claim is an `ast` test
+   over the source rather than a hand-kept list of adopting commands. The handoff's
+   reason for deferring the sanctions fetchers — that they commit on their own
+   transaction — was **wrong**; they do not, and adopting them was the same change as
+   the rest. **Still not covered:** eight commands write rows while recording no run
+   at all, named in `provider_health.NO_RUN_HISTORY` and printed in the report. Five
+   of them (`fetch-sentiment`, `fetch-stablecoins`, `fetch-market-activity`,
+   `store-evidence`, `fetch-evidence`) are a real gap — a success is invisible too,
+   not only a failure — and closing it means adding `record_ingest_run` calls to two
+   modules that have none.
 4. **Finish the type annotations.** The gate prevents the debt growing in the
    foundation; it does not repay it in the historical modules. 542 functions
    still carry no annotation and their bodies are the only thing checked.

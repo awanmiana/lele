@@ -169,6 +169,7 @@ def fetch_ofac(conn, source="ofac-sdn"):
         raise ValueError("unsupported sanctions source; choose ofac-sdn")
     url = SANCTIONS_ENDPOINTS["OFAC_SDN_CSV"]
     started = clock.now()
+    registry.record_failures(conn, source=source, started=started)
     descriptor, path = tempfile.mkstemp(suffix=".csv")
     os.close(descriptor)
     try:
@@ -189,6 +190,7 @@ def fetch_ofac(conn, source="ofac-sdn"):
         if delisted:
             warnings.append(f"{delisted} previously active listings are absent from the current "
                             "file and were marked delisted, not deleted.")
+        registry.clear_failure_recorder(conn)
         registry.record_ingest_run(
             conn, source, started.isoformat(), clock.now().isoformat(),
             fetched=len(listings), stored=imported, skipped=skipped, pages=1,
@@ -298,6 +300,7 @@ def fetch_un(conn, source="un-consolidated"):
         raise ValueError("unsupported sanctions source")
     url = SANCTIONS_ENDPOINTS["UN_CONSOLIDATED_XML"]
     started = clock.now()
+    registry.record_failures(conn, source=source, started=started)
     descriptor, path = tempfile.mkstemp(suffix=".xml")
     os.close(descriptor)
     try:
@@ -320,6 +323,7 @@ def fetch_un(conn, source="un-consolidated"):
         if delisted:
             warnings.append(f"{delisted} previously active listings are absent from the current "
                             "file and were marked delisted, not deleted.")
+        registry.clear_failure_recorder(conn)
         registry.record_ingest_run(
             conn, source, started.isoformat(), clock.now().isoformat(),
             fetched=len(listings), stored=imported, skipped=skipped, pages=1,
@@ -431,6 +435,7 @@ def fetch_uk(conn, source="uk-ofsi"):
         raise ValueError("unsupported sanctions source")
     url = SANCTIONS_ENDPOINTS["UK_OFSI_CONLIST_CSV"]
     started = clock.now()
+    registry.record_failures(conn, source=source, started=started)
     descriptor, path = tempfile.mkstemp(suffix=".csv")
     os.close(descriptor)
     try:
@@ -451,6 +456,7 @@ def fetch_uk(conn, source="uk-ofsi"):
         if delisted:
             warnings.append(f"{delisted} previously active listings are absent from the current "
                             "file and were marked delisted, not deleted.")
+        registry.clear_failure_recorder(conn)
         registry.record_ingest_run(
             conn, source, started.isoformat(), clock.now().isoformat(),
             fetched=len(listings), stored=imported, skipped=skipped, pages=1,
@@ -551,6 +557,7 @@ def fetch_eu(conn, source="eu-consolidated"):
         raise ValueError("unsupported sanctions source")
     url = SANCTIONS_ENDPOINTS["EU_CONSOLIDATED_XML"]
     started = clock.now()
+    registry.record_failures(conn, source=source, started=started)
     descriptor, path = tempfile.mkstemp(suffix=".xml")
     os.close(descriptor)
     try:
@@ -573,6 +580,7 @@ def fetch_eu(conn, source="eu-consolidated"):
         if delisted:
             warnings.append(f"{delisted} previously active listings are absent from the current "
                             "file and were marked delisted, not deleted.")
+        registry.clear_failure_recorder(conn)
         registry.record_ingest_run(
             conn, source, started.isoformat(), clock.now().isoformat(),
             fetched=len(listings), stored=imported, skipped=skipped, pages=1,

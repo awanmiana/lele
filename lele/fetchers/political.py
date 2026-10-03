@@ -170,6 +170,7 @@ def fetch_political(conn, limit=MAX_LIMIT_DEFAULT, start=None, end=None, categor
     if begin > finish:
         raise ValueError("start must not be after end")
     started = clock.now()
+    registry.record_failures(conn, source=SOURCE, started=started, query=f'{begin.isoformat()}..{finish.isoformat()}')
     client = HTTPClient(ttl=0)
     query_params = {"conditions[publication_date][gte]": begin.isoformat(),
                        "conditions[publication_date][lte]": finish.isoformat(),
@@ -207,6 +208,7 @@ def fetch_political(conn, limit=MAX_LIMIT_DEFAULT, start=None, end=None, categor
     truncated = len(results) >= limit
     if truncated:
         warnings.append("the page returned the full limit; older documents may be absent")
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
         query=f"{begin.isoformat()}..{finish.isoformat()}",

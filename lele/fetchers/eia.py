@@ -107,6 +107,7 @@ def fetch_eia(conn, series_ids, api_key, limit=MAX_LIMIT_DEFAULT, start=None, en
         raise ValueError("start must not be after end")
 
     started = clock.now()
+    registry.record_failures(conn, source=SOURCE, started=started, query=f"EIA series {','.join(series_ids)} {start_date}..{end_date}")
     client = HTTPClient(ttl=0)
 
     params = {
@@ -161,6 +162,7 @@ def fetch_eia(conn, series_ids, api_key, limit=MAX_LIMIT_DEFAULT, start=None, en
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
     warnings = list(client.warnings)
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
         query=f"EIA series {','.join(series_ids)} {start_date}..{end_date}",
@@ -216,6 +218,7 @@ def fetch_bls(conn, series_ids, limit=MAX_LIMIT_DEFAULT, start=None, end=None,
         raise ValueError("start must not be after end")
 
     started = clock.now()
+    registry.record_failures(conn, source=SOURCE, started=started, query=f"BLS series {','.join(series_ids)} {start_year}..{end_year}")
     client = HTTPClient(ttl=0)
 
     payload = {
@@ -301,6 +304,7 @@ def fetch_bls(conn, series_ids, limit=MAX_LIMIT_DEFAULT, start=None, end=None,
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
     warnings = list(client.warnings)
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
         query=f"BLS series {','.join(series_ids)} {start_year}..{end_year}",

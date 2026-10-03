@@ -124,6 +124,7 @@ def fetch_price_history(conn, entity_id, symbol, interval="1d", limit=1000, page
         raise ValueError(f"entity {entity_id} not found")
     importer._text(entity["key"], "entity key", 512, True)
     started = _now()
+    registry.record_failures(conn, source=f'{SOURCE}-history', started=started, query=symbol, indicator=interval)
     finish = validate_request(symbol, interval, limit, pages, end, started)
     interval_seconds = INTERVALS[interval]
     page_size = min(MAX_PAGE, limit)
@@ -186,6 +187,7 @@ def fetch_price_history(conn, entity_id, symbol, interval="1d", limit=1000, page
     payload_hash = hashlib.sha256(
         json.dumps(pages_detail, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    registry.clear_failure_recorder(conn)
     run_id = registry.record_ingest_run(
         conn, source=f"{SOURCE}-history", query=symbol, indicator=interval,
         started_at=started.isoformat(), finished_at=_now().isoformat(),

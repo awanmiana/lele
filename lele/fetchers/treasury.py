@@ -80,6 +80,7 @@ def fetch_treasury(conn, limit=MAX_LIMIT_DEFAULT, start=None, end=None):
     if begin > finish:
         raise ValueError("start must not be after end")
     started = clock.now()
+    registry.record_failures(conn, source=SOURCE, started=started, query=f'{begin.isoformat()}..{finish.isoformat()}')
     client = HTTPClient(ttl=0)
     query = urlencode({"sort": "-record_date", "filter[record_date][gte]": begin.isoformat(),
                         "filter[record_date][lte]": finish.isoformat(),
@@ -117,6 +118,7 @@ def fetch_treasury(conn, limit=MAX_LIMIT_DEFAULT, start=None, end=None):
     warnings = list(client.warnings)
     if truncated:
         warnings.append("the page returned the full limit; older data may be absent")
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
         query=f"{begin.isoformat()}..{finish.isoformat()}",

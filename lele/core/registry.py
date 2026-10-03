@@ -2246,6 +2246,56 @@ def failed_run(*, source: str, started_at: str, **fields):
     return recorder
 
 
+def record_failures(conn, *, source: str, started, **scope) -> bool:
+    """Record a failure of the work about to run, if this session fails.
+
+    Registered after the caller's own validation and cleared by
+    `clear_failure_recorder` once the work has recorded its success, so a run row
+    exists for a fetch that reached its provider and for nothing else. Returns
+    whether it was registered: a plain `sqlite3.Connection` cannot carry it.
+
+    `started` may be a datetime or the ISO text one fetcher already keeps, because
+    the run rows themselves take both and this must not disagree with them.
+    """
+    if hasattr(started, "isoformat"):
+        stamp = started.isoformat()
+    elif isinstance(started, str) and started.strip():
+        stamp = started.strip()
+    else:
+        raise ValueError("started must be a datetime or an ISO instant")
+    _instant(stamp)
+    return set_failure_recorder(conn, failed_run(source=source, started_at=stamp, **scope))
+
+
+def _instant(text: str) -> datetime:
+    """Parse an aware ISO instant, refusing a naive one.
+
+    A failure row with a timestamp nothing can compare against is a row nobody can
+    order, and the recorded requests carry offsets, so a bare local time is refused
+    rather than assumed to be UTC.
+    """
+    try:
+        moment = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{text!r} is not an ISO-8601 instant") from exc
+    if moment.tzinfo is None:
+        raise ValueError("an instant needs a UTC offset; a bare local time is ambiguous")
+    return moment
+
+
+def clear_failure_recorder(conn) -> bool:
+    """Stop recording failures, because the work recorded a success instead.
+
+    A no-op on a connection that never registered one, so a caller does not have to
+    remember whether its connection was the project's type.
+    """
+    try:
+        conn.lele_failure_recorder = None
+    except AttributeError:
+        return False
+    return True
+
+
 def set_failure_recorder(conn, recorder) -> bool:
     """Register what to record if this session fails. See `get_conn`.
 

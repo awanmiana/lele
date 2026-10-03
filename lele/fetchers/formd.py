@@ -166,6 +166,7 @@ def fetch_formd(conn, entity_id, limit=MAX_FILINGS_DEFAULT):
         raise ValueError(f"entity {entity_id} not found")
     cik = _entity_cik(conn, entity)
     started = clock.now()
+    registry.record_failures(conn, source=SOURCE, started=started, query=cik)
     client = HTTPClient(ttl=0, max_bytes=MAX_SUBMISSIONS_BYTES)
     url = f"{SOURCES['SEC_SUBMISSIONS']}/CIK{cik}.json"
     try:
@@ -200,6 +201,7 @@ def fetch_formd(conn, entity_id, limit=MAX_FILINGS_DEFAULT):
     finished = clock.now()
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"),
                            allow_nan=False).encode("utf-8")
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(), query=cik,
         fetched=len(filings), stored=result["imported"], skipped=malformed,

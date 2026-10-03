@@ -1416,3 +1416,115 @@ because either alone would pass a weaker test:
   this program has a defect, and it is recorded as such rather than hidden.
 - Nothing here compares a failure against a threshold. How many failures matter is
   the operator's call, and this reports the count.
+
+## 18. Every fetcher that records a success now records a failure
+
+§17 adopted failure recording for `fetch` and named the rest as unadopted. This
+closes that, and the interesting part is not the twenty-three edits — it is what
+happened when a script made them, and what the coverage claim rests on instead.
+
+### 18.1 What was adopted, and how it is checked
+
+Twenty-three recording sites across sixteen modules: `awards`, `comtrade` (two),
+`eia` (two), `form4`, `formadv` (two), `formd`, `lobbying`, `material`, `nport`,
+`opensky` (two), `political`, `thirteenf`, `treasury`, `history`, the four
+`sanctions` fetchers, and `price_import`. Each registers its recorder with its own
+`SOURCE` constant and its own scope expression, so a failure lands in **the same
+series as that source's successes** — the grouping `(source, query, country,
+indicator, category)` is identical by construction because both rows reference the
+same local variables.
+
+Two of the twenty-three could not be registered where `started` is taken, because
+the scope does not exist yet: `price_import` learns the symbol after reading and
+parsing the file, and `fetch_opensky_flights` resolves its window after parsing
+`begin`/`end`. Both registrations moved to just after their scope is resolved and
+before the request or the first write. Both say so in a comment, because the reason
+is not obvious from the position.
+
+**The coverage claim is a test over the source, not a list.** `FAILURE_RECORDING`
+is a sentence, and the sentence is checked by an `ast` test that walks every module
+calling `record_ingest_run` and requires it to call `record_failures` *and*
+`clear_failure_recorder`. A list of twenty-four adopting commands is a list to
+forget; a test that fails when a new fetcher joins one half of the pair is not.
+
+### 18.2 The two bugs a script wrote, and what they were
+
+The edits were applied by a script, and it got the insertion point wrong twice. Both
+were caught by `compileall`, which is the reason it runs before the tests (§5).
+
+1. **Off-by-one on the clear.** `lines.insert(call.lineno, …)` inserts *after* the
+   line the statement starts on, which put the clear line inside the middle of a
+   multi-line `record_ingest_run(` call. A `finally`-less `clear` in the wrong place
+   is a syntax error, which is the good outcome.
+2. **`started.lineno + started.end_lineno` as an insert index.** For a single-line
+   assignment that is `2 × lineno`, so one registration landed at the end of a file.
+   The assertion I had written — one `started` assignment per function — passed, and
+   the arithmetic was still wrong.
+
+Then one real design bug, found by mypy rather than by a test: `record_failures`
+raised `ValueError: started must be a datetime` because `sources.py` keeps `started`
+as an **ISO string** while every other fetcher keeps a datetime. That is the same
+"the field's type is not what the column implies" family as §10, and it is why the
+helper now accepts either and refuses anything that is not an aware instant. Before
+the fix, a failing `lele fetch` recorded **nothing** and was reported as "invalid
+data or registry schema" — a monitoring feature that silently did the opposite of
+its purpose.
+
+### 18.3 The handoff's reason for deferring sanctions was wrong
+
+The previous handoff said the sanctions fetchers should be adopted **last**, because
+"those commit on their own transaction". They do not: there is no `conn.commit()` in
+`lele/analysis/sanctions.py`. They take a write session from the CLI like every other
+command, so the rollback discards their work exactly as it does everyone else's, and
+adopting them is the same two-line change as the rest. **The stated reason was wrong
+and the ordering it produced was unnecessary.** Recorded because a handoff's
+explanation is a claim like any other.
+
+### 18.4 What is still not covered, and why it is a different gap
+
+Eight commands write rows to the registry and record **no run at all**, so this
+monitor is blind to them in both directions. They are named in `NO_RUN_HISTORY`,
+printed in the report and quoted by the generated summary:
+
+| command | why it records nothing |
+| --- | --- |
+| `fetch-sentiment`, `fetch-stablecoins`, `fetch-market-activity` | `fetchers/crypto_context.py` writes `observations` and never records a run |
+| `store-evidence`, `fetch-evidence` | `fetchers/evidence.py` writes through the observation bridge and records no run |
+| `fetch-prices`, `fetch-cot`, `fetch-short` | write an export file, never the registry, so there is nothing to roll back |
+
+The first two rows are a real gap and a different one from §17: not "a failure is
+invisible" but "a success is invisible too". Closing it means adding
+`record_ingest_run` calls to two modules that have none, which is new bookkeeping
+rather than an adoption, and it is the next task. The third row is not a gap at all:
+a command that writes no rows has no transaction to roll back, so a failure there
+costs nothing and leaves nothing behind — which is why the list is published as one
+list rather than two.
+
+### 18.5 Tests
+
+`tests/test_failed_runs.py` grew to 19 tests. The new ones:
+
+- **every module that records a completed run also records a failure**, over the
+  source, checked with `ast`, with the module name in the failure message;
+- **and also clears it**, because a recorder left registered would attribute a later
+  failure in the same session to that fetcher;
+- **the gap list is machine-checked** against the command table, and
+  `crypto_context.py`/`evidence.py` are asserted still to record nothing, so a
+  module that starts recording cannot sit in a list that says it does not;
+- **a successful import leaves no failure recorded**, tested through
+  `import-price-history` (no provider, no fixture beyond a file) by failing a later
+  operation in the same session and asserting the only run is the import's own
+  `completed` row. This is the test that would have caught the forgotten `finally` in
+  §17.
+
+### 18.6 What this does not establish
+
+- Recording a failure is not a verdict on a provider, and the flag says so. One
+  attempt failing is an event.
+- The eight commands in `NO_RUN_HISTORY` are still invisible here, five of them
+  because they record nothing at all.
+- Nothing compares failures against a threshold. `failed_runs` is a count and the
+  reader decides what it means.
+- A failure recorded after a rollback says the fetch did not complete. It does not
+  say how much of it had already been stored before the rollback, because those rows
+  are gone — only the counts on the *successful* rows ever recorded survive.

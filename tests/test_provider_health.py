@@ -153,13 +153,14 @@ class Flags(RegistryCase):
         self.assertNotIn("SECRET", json.dumps(series))
         self.assertNotIn("SECRET", json.dumps(entry["reasons"]))
 
-    def test_a_failure_recording_command_must_be_a_real_fetch_command(self):
-        """The list is machine-checked: a name that is not a fetch command, or that
-        no longer exists, would claim a coverage this project does not have."""
+    def test_every_no_run_history_command_is_a_real_fetch_or_store_command(self):
+        """The gap list is machine-checked: a name that is not a command, or that no
+        longer exists, would describe a coverage this project does not have."""
         from lele.cli.main import COMMANDS
-        self.assertEqual(set(provider_health.FAILURE_RECORDING_COMMANDS) - set(COMMANDS), set())
-        for command in provider_health.FAILURE_RECORDING_COMMANDS:
-            self.assertTrue(command.startswith("fetch"), command)
+        self.assertEqual(set(provider_health.NO_RUN_HISTORY) - set(COMMANDS), set())
+        for command in provider_health.NO_RUN_HISTORY:
+            self.assertTrue(command.startswith(("fetch", "store")), command)
+        self.assertIn("also records a failed one", provider_health.FAILURE_RECORDING)
 
     def test_a_changed_recorded_request_stops_the_comparison_being_made(self):
         run(self.conn, fetched=500, request="req-1", started=NOW - timedelta(hours=2))
@@ -325,8 +326,8 @@ class WhatItRefusesToSay(RegistryCase):
         run(self.conn)
         report = self.report()
         joined = " ".join(report["what_this_is_not"]).lower()
-        self.assertIn("a failed run of `fetch` is recorded", joined)
-        self.assertIn("the `fetch-*` extractors do not record one yet", joined)
+        self.assertIn("a failed run is recorded with a classified reason", joined)
+        self.assertIn("no_run_history", joined)
         self.assertIn("absence of a new run is still not evidence that a source works", joined)
         self.assertIn("no run records a hash of the records themselves", joined)
         self.assertEqual(report["what_this_is_not"], list(provider_health.NOT_A_CHECK))
@@ -425,7 +426,7 @@ class CommandLineAndDoctor(unittest.TestCase):
         self.assertEqual(block["sources"], 1)
         self.assertEqual(block["flagged_series"], 1)
         self.assertEqual(block["worst"][0]["source"], "opensky")
-        self.assertIn("A failed run of `fetch` is recorded",
+        self.assertIn("A failed run is recorded with a classified reason",
                       " ".join(block["what_this_is_not"]))
 
     def test_doctor_reports_provider_health_as_unreadable_rather_than_omitting_it(self):

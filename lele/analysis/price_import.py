@@ -236,6 +236,11 @@ def import_price_history(conn, entity_id, path, interval="1d", now=None):
     importer._text(entity["key"], "entity key", 512, True)
     payload = _load(path)
     instrument = _instrument(payload["instrument"])
+    # Registered once the symbol is known, which is after the file is read and parsed
+    # and before anything is stored: a refused argument or an unreadable file is not a
+    # run, and a failure from here on is.
+    registry.record_failures(conn, source="import-history", started=started,
+                             query=instrument["symbol"], indicator=interval)
     interval_seconds = INTERVALS[interval]
     newest_allowed = started.astimezone(UTC).isoformat()
     bars = [_bar(row, interval_seconds, newest_allowed) for row in payload["bars"]]
@@ -295,6 +300,7 @@ def import_price_history(conn, entity_id, path, interval="1d", now=None):
     if instrument["adjustment"] == "unknown":
         unknown.insert(0, "adjustment (stated as unknown: any split, distribution or roll "
                           "across the imported span is unrepaired)")
+    registry.clear_failure_recorder(conn)
     run_id = registry.record_ingest_run(
         conn, source="import-history", query=instrument["symbol"], indicator=interval,
         started_at=started.isoformat(), finished_at=(now or _now()).isoformat(),

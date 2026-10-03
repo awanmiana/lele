@@ -90,25 +90,43 @@ FLAGS = (
     "stale",
 )
 
-#: Commands that record a failed run. A failure has to be written outside the
-#: transaction it rolls back, so a command adopts it deliberately rather than by
-#: accident, and the list is machine-checked against the command table: a name here
-#: that is not a fetch command, or that no longer exists, fails a test.
-#: `fetch` adopted it on 2026-10-03. The `fetch-*` extractors have not, and a failure
-#: in one of those leaves no row, which is why this list is published rather than
-#: assumed to cover every source.
-FAILURE_RECORDING_COMMANDS = ("fetch",)
+#: Commands that write rows to the registry and record **no** run at all, so this
+#: monitor sees neither their successes nor their failures. Not a coverage claim and
+#: not a to-do list invented here: it is what is left after every module that calls
+#: `record_ingest_run` was checked to also call `record_failures`, which a test
+#: asserts over the source rather than over a list somebody maintains.
+#:
+#: The crypto context sources write `observations` and record nothing; the export
+#: commands write a file and never touch the registry, so there is nothing for them
+#: to record and a failure in them is not a rolled-back write.
+NO_RUN_HISTORY = (
+    "fetch-sentiment",
+    "fetch-stablecoins",
+    "fetch-market-activity",
+    "store-evidence",
+    "fetch-evidence",
+    "fetch-prices",
+    "fetch-cot",
+    "fetch-short",
+)
+
+#: What is covered instead of a list of adopting commands. Every module that records a
+#: completed run also records a failed one, and that is checked over the source rather
+#: than asserted here, so this cannot drift from the code it describes.
+FAILURE_RECORDING = ("every command whose fetcher records a completed run also records a "
+                     "failed one; the check is a test over the source, not this sentence")
+
 
 #: What this monitor is, stated in its own output rather than only here.
 NOT_A_CHECK = (
     "This is not a health check of a provider. It reports what the recorded runs say "
     "about what a source last returned to this program, which is a different thing from "
     "whether the provider is correct.",
-    "A failed run of `fetch` is recorded, with a classified reason and the exception's class "
-    "name and never its message. The `fetch-*` extractors do not record one yet, so a failure "
-    "in those leaves no trace here and this monitor is blind to it. Absence of a new run is "
-    "still not evidence that a source works, and nothing in this report can call a source "
-    "failing or healthy.",
+    "A failed run is recorded with a classified reason and the exception's class name and "
+    "never its message, on the connection whose transaction has already been rolled back. "
+    "Commands writing rows while recording no run at all are named in NO_RUN_HISTORY, so this "
+    "monitor is blind to them in both directions. Absence of a new run is still not evidence "
+    "that a source works, and nothing in this report can call a source failing or healthy.",
     "No run records a hash of the records themselves: 17 of 25 recording sites pass no "
     "records_sha256 and the rest hash counts and page metadata. A provider returning the "
     "same number of different records is invisible here.",
@@ -365,7 +383,8 @@ def report(conn, *, source: str = "", since_hours: int = 0,
                                                    else "no_flags"),
         "collapse_threshold": str(COLLAPSE_FRACTION),
         "flags_named": list(FLAGS),
-        "failure_recording_commands": list(FAILURE_RECORDING_COMMANDS),
+        "failure_recording": FAILURE_RECORDING,
+        "no_run_history": list(NO_RUN_HISTORY),
         "what_this_is": "what the recorded ingest runs say about what each source last "
                         "returned to this program, compared only across an unchanged recorded "
                         "request",
@@ -374,11 +393,10 @@ def report(conn, *, source: str = "", since_hours: int = 0,
         "completeness_note": "a bounded run history cannot show that a source has nothing else "
                              "to report, and a source absent from it may be one this registry "
                              "never fetched",
-        "failure_recording_note": "commands recording a failed run: "
-                                  + ", ".join(FAILURE_RECORDING_COMMANDS)
-                                  + ". Every other fetch command rolls its failure back with its "
-                                    "transaction and leaves no row, so this report says nothing "
-                                    "about whether it worked",
+        "failure_recording_note": "every command whose fetcher records a completed run also "
+                                  "records a failed one. Commands that record no run at all, and "
+                                  "so are invisible to this report in both directions: "
+                                  + ", ".join(NO_RUN_HISTORY),
     }
 
 

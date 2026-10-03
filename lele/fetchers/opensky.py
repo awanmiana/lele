@@ -116,6 +116,7 @@ def fetch_opensky_states(conn, limit=MAX_LIMIT_DEFAULT, time=None, icao24="", bb
     if type(limit) is not int or not 1 <= limit <= MAX_LIMIT:
         raise ValueError(f"limit must be an integer from 1 to {MAX_LIMIT}")
     started = clock.now()
+    registry.record_failures(conn, source=SOURCE, started=started, query=f"OpenSky states time:{time or 'now'} icao24:{icao24 or 'all'}")
     client = HTTPClient(ttl=0)
     params = {}
     if time:
@@ -152,6 +153,7 @@ def fetch_opensky_states(conn, limit=MAX_LIMIT_DEFAULT, time=None, icao24="", bb
         "params": params, "limit": limit
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     warnings = list(client.warnings)
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
         query=f"OpenSky states time:{time or 'now'} icao24:{icao24 or 'all'}",
@@ -217,6 +219,9 @@ def fetch_opensky_flights(conn, limit=MAX_LIMIT_DEFAULT, begin=None, end=None,
             end_ts = int(end)
     else:
         end_ts = int(clock.now().timestamp())
+    # Registered once the window is resolved, which is before the request is built.
+    registry.record_failures(conn, source=SOURCE, started=started,
+                             query=f"OpenSky flights {begin_ts}..{end_ts}")
     params = {"begin": str(begin_ts), "end": str(end_ts)}
     url = f"{BASE_URL}/flights/all?{urlencode(params)}"
     auth = base64.b64encode(f"{username}:{password}".encode()).decode()
@@ -279,6 +284,7 @@ def fetch_opensky_flights(conn, limit=MAX_LIMIT_DEFAULT, begin=None, end=None,
         "params": params, "limit": limit
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     warnings = list(client.warnings)
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
         query=f"OpenSky flights {begin_ts}..{end_ts}",

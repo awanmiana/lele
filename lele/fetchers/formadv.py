@@ -100,6 +100,7 @@ def fetch_formadv(conn, query="", limit=MAX_LIMIT_DEFAULT, start=0):
         raise ValueError("start must be a non-negative integer")
 
     started = clock.now()
+    registry.record_failures(conn, source=SOURCE, started=started, query=f"Form ADV search query:{query or 'all'} limit:{limit}")
     client = HTTPClient(ttl=0)
 
     params = {
@@ -139,6 +140,7 @@ def fetch_formadv(conn, query="", limit=MAX_LIMIT_DEFAULT, start=0):
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
     warnings = list(client.warnings)
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
         query=f"Form ADV search query:{query or 'all'} limit:{limit}",
@@ -184,6 +186,7 @@ def fetch_formadv_individual(conn, query="", limit=MAX_LIMIT_DEFAULT, start=0):
         raise ValueError(f"limit must be an integer from 1 to {MAX_LIMIT}")
 
     started = clock.now()
+    registry.record_failures(conn, source=SOURCE, started=started, query=f'Form ADV individual search query:{query} limit:{limit}')
     client = HTTPClient(ttl=0)
 
     params = {
@@ -264,6 +267,7 @@ def fetch_formadv_individual(conn, query="", limit=MAX_LIMIT_DEFAULT, start=0):
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
     warnings = list(client.warnings)
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
         query=f"Form ADV individual search query:{query} limit:{limit}",

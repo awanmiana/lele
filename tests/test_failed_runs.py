@@ -12,12 +12,15 @@ The failure modes pinned here are a row that is rolled back with everything else
 monitor stays blind and nothing says so), a row that survives but carries a secret,
 and a row that reports itself written when it was not.
 """
+import ast
 import io
 import json
 import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import UTC, datetime
+from pathlib import Path
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
@@ -31,11 +34,12 @@ SECRET = "token=SECRET-do-not-store"
 
 
 class FileRegistry(unittest.TestCase):
-    """A file-backed registry, because the failure row needs a second connection."""
+    """A file-backed registry, because a rollback is what makes the row a test."""
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
+        self.root = directory.name
         self.path = os.path.join(directory.name, "registry.db")
         db.init_db(self.path)
 
@@ -168,6 +172,88 @@ class TheMessageIsNeverStored(FileRegistry):
             self.assertTrue(reason.startswith(("the ", "a ")))
 
 
+class Adoption(unittest.TestCase):
+    """Checked over the source, because a list of adopting commands is a list to forget.
+
+    Every module that records a completed run must also register a failure recorder.
+    That is the whole coverage claim in `provider_health`, and asserting it with `ast`
+    means a new fetcher cannot join the family without joining both halves.
+    """
+
+    def _modules(self):
+        root = Path(__file__).resolve().parent.parent / "lele"
+        for path in sorted(root.rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            yield path, ast.parse(text), text
+
+    def test_every_module_recording_a_completed_run_also_records_a_failure(self):
+        checked = 0
+        for path, tree, text in self._modules():
+            if "record_ingest_run(" not in text:
+                continue
+            checked += 1
+            with self.subTest(module=path.name):
+                self.assertIn("record_failures(", text,
+                              f"{path.name} records a completed run but never registers a "
+                              "failure recorder, so a failure of its fetcher leaves no row")
+                self.assertIn("clear_failure_recorder(conn)", text,
+                              f"{path.name} registers a failure recorder and never clears it, so "
+                              "a later failure in the same session would be recorded against "
+                              "this fetcher")
+        self.assertGreaterEqual(checked, 16, "the family is smaller than expected")
+
+    def test_the_no_run_history_list_names_real_fetch_commands_and_no_run_history_writes(self):
+        from lele.cli.main import COMMANDS
+        self.assertEqual(set(provider_health.NO_RUN_HISTORY) - set(COMMANDS), set())
+        for command in provider_health.NO_RUN_HISTORY:
+            self.assertTrue(command.startswith(("fetch", "store")), command)
+        for module in ("crypto_context.py", "evidence.py"):
+            text = (Path(__file__).resolve().parent.parent / "lele" / "fetchers" / module).read_text(
+                encoding="utf-8")
+            self.assertNotIn("record_ingest_run(", text,
+                             f"{module} now records runs, so it belongs in the recorded family "
+                             "and not in NO_RUN_HISTORY")
+
+class ClearingOnSuccess(FileRegistry):
+    """The registry this test writes to, with somewhere to put an export file."""
+
+    def test_a_fetcher_that_records_a_success_leaves_no_failure_recorded(self):
+        """The clear on success is the half that is easy to leave out.
+
+        A fetcher that registered a recorder and returned normally without clearing it
+        would attribute a later failure in the same session to this fetcher, so the
+        session runs a fetch and then fails, and only the fetch's own run may exist.
+        `import-history` is used because it needs no provider and no fixture beyond a
+        file, and it writes bars, so it exercises the same rollback as any other.
+        """
+        from lele.analysis import price_import
+        rows = [{"open_time": f"2026-01-{day:02d}T00:00:00+00:00",
+                 "open": "100", "high": "110", "low": "99", "close": "105",
+                 "volume": "1"} for day in range(1, 6)]
+        path = os.path.join(self.root, "export.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"instrument": {"symbol": "EQUITY-A", "venue": "TESTEX",
+                                      "currency": "USD", "asset_class": "equity",
+                                      "adjustment": "adjusted",
+                                      "rights_basis": "synthetic fixture"},
+                       "source": "fixture", "source_url": "local:synthetic-fixture",
+                       "retrieved_at": "2026-01-31T00:00:00+00:00",
+                       "bars": rows}, handle)
+        with registry.get_conn(self.path) as conn:
+            entity_id = registry.upsert_entity(conn, "instrument", "Equity A",
+                                               key="local:equity-a")
+            price_import.import_price_history(conn, entity_id, path, "1d",
+                                              now=datetime(2026, 2, 1, tzinfo=UTC))
+        # A later failure in the same session must not be recorded against the import.
+        with self.assertRaises(RuntimeError):
+            with registry.get_conn(self.path) as conn:
+                raise RuntimeError("something else failed later")
+        runs = self.runs()
+        self.assertEqual([row["status"] for row in runs], ["completed"],
+                         "a successful import recorded one completed run and no failure")
+        self.assertEqual(runs[0]["source"], "import-history")
+
+
 class InMemory(FileRegistry):
 
     def test_an_in_memory_registry_records_the_failure_too(self):
@@ -197,13 +283,11 @@ class InMemory(FileRegistry):
                          "the recorder ran after the rollback and wrote its row")
 
 
-class ThroughTheFetcher(unittest.TestCase):
+class ThroughTheFetcher(FileRegistry):
 
     def setUp(self):
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.path = os.path.join(directory.name, "registry.db")
-        db.init_db(self.path)
+        super().setUp()
+        self.root = self.path
 
     def test_a_failing_fetch_through_the_command_leaves_a_row_and_stores_nothing(self):
         with registry.get_conn(self.path) as conn:
@@ -247,15 +331,16 @@ class ThroughTheFetcher(unittest.TestCase):
         self.assertEqual(series["failed_runs"], 1)
         self.assertIn("recorded_failure", report["flags"])
         self.assertIn("source_request", " ".join(series["failure_reasons"]))
-        self.assertEqual(report["failure_recording_commands"],
-                         list(provider_health.FAILURE_RECORDING_COMMANDS))
-        self.assertIn("leaves no row", report["failure_recording_note"])
+        self.assertIn("also records a failed one", report["failure_recording"])
+        self.assertIn("invisible to this report in both directions",
+                      report["failure_recording_note"])
+        self.assertIn("fetch-sentiment", report["no_run_history"])
 
     def test_a_provider_report_still_blames_no_source_for_a_command_that_records_nothing(self):
         with registry.get_read_conn(self.path) as conn:
             report = provider_health.report(conn)
         self.assertEqual(report["window"]["series"], 0)
-        self.assertIn("says nothing about whether it worked", report["failure_recording_note"])
+        self.assertIn("record no run at all", report["failure_recording_note"])
 
 
 if __name__ == "__main__":

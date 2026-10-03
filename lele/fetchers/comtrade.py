@@ -142,6 +142,7 @@ def fetch_comtrade(conn, reporter_code="842", partner_code="0", hs_code="", limi
         raise ValueError("start must not be after end")
 
     started = clock.now()
+    registry.record_failures(conn, source=SOURCE, started=started, query=f"{reporter_code}->{partner_code} HS:{hs_code or 'all'} {start_date}..{end_date}")
     client = HTTPClient(ttl=0)
 
     params = {
@@ -208,6 +209,7 @@ def fetch_comtrade(conn, reporter_code="842", partner_code="0", hs_code="", limi
         warnings.append("result hit limit; older periods may be absent")
 
     import hashlib
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
         query=f"{reporter_code}->{partner_code} HS:{hs_code or 'all'} {start_date}..{end_date}",
@@ -263,6 +265,7 @@ def fetch_census_trade(conn, limit=MAX_LIMIT_DEFAULT, start=None, end=None,
         raise ValueError("start must not be after end")
 
     started = clock.now()
+    registry.record_failures(conn, source=SOURCE, started=started, query=f'census trade {start_date}..{end_date} commodity:{commodity} country:{country}')
     client = HTTPClient(ttl=0)
 
     # US Census trade API - use imports/exports endpoints
@@ -406,6 +409,7 @@ def fetch_census_trade(conn, limit=MAX_LIMIT_DEFAULT, start=None, end=None,
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
     warnings = list(client.warnings)
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
         query=f"census trade {start_date}..{end_date} commodity:{commodity} country:{country}",

@@ -108,6 +108,7 @@ def fetch_awards(conn, entity_id, ueis, limit=MAX_LIMIT_DEFAULT, start=None, end
     if begin > finish:
         raise ValueError("start must not be after end")
     started = clock.now()
+    registry.record_failures(conn, source=SOURCE, started=started, query=','.join(sorted(expected)))
     client = HTTPClient(ttl=0)
     url = SOURCES["USASPENDING_AWARDS"] + "/"
     periods = [{"start_date": begin.isoformat(), "end_date": finish.isoformat()}]
@@ -160,6 +161,7 @@ def fetch_awards(conn, entity_id, ueis, limit=MAX_LIMIT_DEFAULT, start=None, end
     if unmatched:
         warnings.append(f"{unmatched} candidate award(s) were excluded because their Recipient UEI "
                         "was not in the explicit set")
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(), query=",".join(sorted(expected)),
         fetched=len(results), stored=stored["imported"], skipped=skipped, pages=len(AWARD_GROUPS),

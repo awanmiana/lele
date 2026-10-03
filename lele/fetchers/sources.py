@@ -3,7 +3,7 @@ import json
 import math
 import re
 import sqlite3
-from ..core import clock
+from ..core import clock, registry
 from datetime import date, datetime
 from typing import TypedDict
 from urllib.parse import quote, urlencode, urlsplit
@@ -17,9 +17,8 @@ from ..core.importer import (
     SEC_DURATION_TAGS, SEC_METRIC_TAGS, SEC_SELECTION, serialize_metric_envelope, validate_metric_envelope,
 )
 from ..core.registry import (add_edge, add_filing, add_metric, clear_edge_failure,
-                             failed_run, latest_resumable_run, normalize_name,
-                             record_edge_failure, record_ingest_run, retract_edge,
-                             set_attr, set_failure_recorder, upsert_entity)
+                             latest_resumable_run, normalize_name, record_edge_failure,
+                             record_ingest_run, retract_edge, set_attr, upsert_entity)
 from .http import HTTPClient, SourceError
 
 
@@ -888,11 +887,9 @@ def _fetch_and_record(conn, result, *, source, query, country, indicator, catego
     """
     # Registered before the request, cleared after the run row is written, so a
     # failure anywhere in the fetch is recorded and nothing else in this session is.
-    registered = set_failure_recorder(
-        conn, failed_run(source=source, query=query, country=country, indicator=indicator,
-                         category=category, started_at=started,
-                         request_sha256=request_sha256))
-    if not registered:
+    if not registry.record_failures(
+            conn, source=source, started=started, query=query, country=country,
+            indicator=indicator, category=category, request_sha256=request_sha256):
         # Present only when it is something: the key's absence means a failure in this
         # fetch would have been recorded, so a normal result keeps the shape it had.
         result["failure_recording"] = ("unavailable: this connection cannot carry a recorder, so "
@@ -906,8 +903,7 @@ def _fetch_and_record(conn, result, *, source, query, country, indicator, catego
     # and clearing it there is what stopped the first version of this from recording
     # anything at all. A run row was written above, so the fetch did not fail, and a
     # later failure in the same session belongs to whatever runs next.
-    if registered:
-        conn.lele_failure_recorder = None
+    registry.clear_failure_recorder(conn)
     return result
 
 

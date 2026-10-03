@@ -128,6 +128,7 @@ def fetch_lobbying(conn, entity_id, client_id=None, registrant_id=None, limit=MA
     if type(year) is not int or not 2008 <= year <= now.year + 1:
         raise ValueError(f"filing year must be an integer from 2008 to {now.year + 1}")
     started = now
+    registry.record_failures(conn, source=SOURCE, started=started, query=str(party_id))
     client = HTTPClient(ttl=0)
     base = SOURCES["SENATE_LDA_FILINGS"] + "/"
     key = "client_id" if binding == "client" else "registrant_id"
@@ -173,6 +174,7 @@ def fetch_lobbying(conn, entity_id, client_id=None, registrant_id=None, limit=MA
     warnings = list(client.warnings)
     if truncated:
         warnings.append("a quarterly page returned the full limit; additional filings may exist")
+    registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(), query=str(party_id),
         fetched=len(records), stored=stored["imported"], skipped=skipped, pages=len(QUARTERS),
