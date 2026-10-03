@@ -91,8 +91,13 @@ open on an older registry raising `no such table`. See
 `AUDIT.md` §15. One durable side effect: the expected table and index inventory is
 now read out of the DDL, so `doctor` cannot be wrong by omission again.
 
-**The next queue, in order.** Items 1, 1a, the capability summary and 2 are closed
-above; the rest are unchanged.
+**Provider health was added 2026-10-03 and closes queue item 3**, after finding that
+the premise behind it was half true: the record hash it was to consume is absent from
+17 of 25 run-recording sites and is a count hash where present, so the monitor
+detects change and silence and says so. See `AUDIT.md` §16.
+
+**The next queue, in order.** Items 1, 1a, the capability summary, 2 and 3 are
+closed above; the rest are unchanged.
 
 1. **Re-establish the M04/M05 enrichment results on the corrected detector.**
    **CLOSED 2026-10-02, recorded in `AUDIT.md` §12.** Kept in the list so the reason
@@ -139,11 +144,21 @@ above; the rest are unchanged.
    bounded by its parent series and by provider reach, not by price history, and
    this command does not prune it because cutting the parent observations is a
    decision about evidence, not about history.
-3. **Provider health monitoring.** `ingest_runs` already records a request hash
-   and a record hash per run. Nothing consumes them. A source that starts
-   returning garbage is currently noticed only by a human reading a report. Note
-   that `prune` now reads those hashes' table on every stored-bar report, so
-   provider health is the next thing that can consume them.
+3. **Provider health monitoring.** **CLOSED 2026-10-03, recorded in `AUDIT.md`
+   §16.** `lele providers`, and a reduced block in `lele doctor`. Groups the
+   recorded runs by source and query, compares only across an unchanged recorded
+   request identity, and publishes the raw first/last/min/max counts beside the
+   nine named flags. **The item's premise was half false and measuring it is the
+   most useful part:** of 25 `record_ingest_run` call sites, **17 pass no
+   `records_sha256`** and the 8 that do hash *counts and page metadata*, so the
+   table holds no content fingerprint and the monitor can only detect change and
+   silence, never wrongness — which it says in its own output. It also cannot see
+   a failure at all, because a failed run rolls back and is never recorded, so
+   nothing may call a source healthy or failing and a test asserts that.
+   **Still open, and the specific next step: record failed runs.** The failure row
+   would have to commit on a different connection from the transaction that rolled
+   back, which touches the "get_conn is the only owner of commit" invariant fixed
+   in §3A2, so it should be a deliberate change rather than a side effect.
 4. **Finish the type annotations.** The gate prevents the debt growing in the
    foundation; it does not repay it in the historical modules. 542 functions
    still carry no annotation and their bodies are the only thing checked.

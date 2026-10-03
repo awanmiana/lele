@@ -17,8 +17,8 @@ from urllib.error import URLError
 
 from ..analysis import (causes, capability, comparison, engine, episodes, events,
                         evidence_store, flows, moves, observations, price_import, projection,
-                        prospective, rag, framework_notes, retention, sanctions, signals, stationarity,
-                        timeline, volatility, volatility_anomaly, worldstate)
+                        prospective, rag, framework_notes, provider_health, retention, sanctions,
+                        signals, stationarity, timeline, volatility, volatility_anomaly, worldstate)
 from ..core import clock, importer, registry
 from ..core import constants
 from ..core.constants import (APP_NAME, APP_VERSION, DB_PATH, FETCH_MAX_LIMIT,
@@ -61,6 +61,7 @@ COMMANDS = {
     "fetch-bls": "Extract bounded BLS labor statistics into observations",
     "fetch-opensky": "Extract bounded OpenSky Network flight data into observations",
     "runs": "List durable ingest runs with counts, coverage and evidence hashes",
+    "providers": "Report what the recorded ingest runs say about each source's shape",
     "edges": "Build sourced relationships from stored entities",
     "import": "Import local JSON",
     "import-history": "Store a user-supplied OHLC export in price history",
@@ -983,11 +984,33 @@ def build_parser():
     backup = parsers["backup"]
     backup.add_argument("path", type=_path, metavar="PATH")
     backup.add_argument("--force", action="store_true", help="Replace an existing backup file")
-    parsers["doctor"].epilog = "Read-only: reports Python/SQLite support, registry presence, PRAGMA integrity_check, foreign-key violations, schema version (migration_pending if behind) and entity/edge counts. An absent registry is reported and never created."
+    parsers["doctor"].epilog = "Read-only: reports Python/SQLite support, registry presence, PRAGMA integrity_check, foreign-key violations, schema version (migration_pending if behind), entity/edge counts, and a provider-health block reduced from the recorded ingest runs. A source health block is not a coverage claim and cannot report a source as failing, because a failed run rolls back and is not recorded. An absent registry is reported and never created."
     backup.epilog = "Consistent SQLite online backup of the existing registry; refuses an absent source and never creates it. The target must not be the registry or its journal files, its parent must already exist, and an existing target is refused without --force. Restore by pointing --db at the backup (replace the live file only when no process is using it)."
     runs = parsers["runs"]
     runs.add_argument("--limit", type=int, choices=range(1, 1001), default=50, metavar="1..1000")
-    runs.epilog = "Completed source ingestion runs recorded in the registry with start/finish times, fetched/stored/skipped/missing counts, pages, truncation, canonical request and stored-record SHA-256 hashes, warnings and coverage text. Failed runs roll back with their transaction and are not listed."
+    runs.epilog = "Completed source ingestion runs recorded in the registry with start/finish times, fetched/stored/skipped/missing counts, pages, truncation, a recorded request SHA-256, a stored-record SHA-256 where the fetcher supplies one, warnings and coverage text. Failed runs roll back with their transaction and are not listed, so an absent run is not evidence a source works."
+    providers = parsers["providers"]
+    providers.add_argument("--source", default="",
+                           help="Restrict the report to one recorded source id, such as "
+                                "sec-form4 or opensky")
+    providers.add_argument("--since-hours", type=int, default=0, metavar="H",
+                           help="Compare only runs started in the last H hours (default: 0, "
+                                "every recorded run)")
+    providers.add_argument("--stale-after-hours", type=int,
+                           default=provider_health.DEFAULT_STALE_HOURS, metavar="H",
+                           help=f"Flag a series whose newest run is older than H hours "
+                                f"(default: {provider_health.DEFAULT_STALE_HOURS}; 0 disables)")
+    providers.add_argument("--limit", type=int, default=100,
+                           choices=range(1, provider_health.MAX_SERIES + 1),
+                           metavar=f"1..{provider_health.MAX_SERIES}",
+                           help="Source-query series to report (default: 100)")
+    providers.epilog = ("Read-only. Groups the recorded ingest runs by source, query, country, "
+        "indicator and category, and compares each series only where the recorded request identity "
+        "is unchanged. Flags: request_changed, count_collapse, stored_zero_while_fetched, "
+        "returned_nothing, never_stored, always_truncated, no_record_hash, stale. This detects "
+        "change and silence, never wrongness: no run records a hash of the records themselves, and "
+        "a failed run rolls back with its transaction and is never recorded, so nothing here can "
+        "call a source failing or healthy.")
     parsers["import"].add_argument("path", type=_path, metavar="PATH", help="Importer JSON with entities, provenance and relationships")
     history_import = parsers["import-history"]
     history_import.add_argument("id", type=_eid, metavar="ID")
@@ -1564,7 +1587,7 @@ READ_ONLY_ACTIONS = {
 
 READ_ONLY_COMMANDS = frozenset({
     "list", "show", "stats", "countries", "runs", "tree", "relationships", "analyze",
-    "finmap", "events", "project", "export", "doctor", "sources", "kinds",
+    "finmap", "events", "project", "export", "doctor", "providers", "sources", "kinds",
     "worldstate", "compare", "episodes", "volatility-analyze",
     "explain", "capital", "summary",
 })
@@ -2046,7 +2069,29 @@ def _dispatch(args, parser=None):
         except ValueError as exc:
             raise CLIError(str(exc), 1) from exc
     if command == "doctor":
-        return registry.health_check(args.db)
+        health = registry.health_check(args.db)
+        if health.get("registry", {}).get("present"):
+            try:
+                with registry.get_read_conn(args.db) as conn:
+                    health["providers"] = provider_health.summary(conn)
+            except sqlite3.Error:
+                # Classified, not echoed: the run history could not be read, so no
+                # claim is made about any source either way.
+                health["providers"] = {
+                    "status": "unreadable",
+                    "note": "the recorded ingest runs could not be read, so no source is "
+                            "reported here in either direction"}
+            except registry.RegistryError:
+                health["providers"] = {
+                    "status": "unreadable",
+                    "note": "the registry holding the recorded ingest runs could not be read, "
+                            "so no source is reported here in either direction"}
+        return health
+    if command == "providers":
+        with registry.get_read_conn(args.db) as conn:
+            return provider_health.report(
+                conn, source=args.source, since_hours=args.since_hours,
+                stale_after_hours=args.stale_after_hours, limit=args.limit)
     if command == "summary":
         return _summary(args, parser if parser is not None else build_parser())
     if command == "init":

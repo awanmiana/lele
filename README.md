@@ -966,6 +966,30 @@ The derived rows go in a new **`context_measures` table (schema v18), not in `ob
 
 Stationarity removes one confound. It does not make any context series a cause of a move, and it does not touch the saturated 24-hour pre-window: every wired context source is daily. `AUDIT.md` §14 records the built layer and the two defects found while building it.
 
+## Provider health: what the recorded runs say (v19)
+
+`lele providers` reads the durable ingest runs and says which sources changed shape. `lele doctor` carries a reduced block, so the answer is where you look when something is already wrong.
+
+```bash
+lele providers                                   # every source-query series
+lele providers --source sec-form4 --since-hours 168
+lele providers --stale-after-hours 0             # switch the staleness flag off
+lele doctor                                      # includes a reduced providers block
+```
+
+Runs are grouped by source, query, country, indicator and category, and each series publishes its run count, first and last start, age in hours, whether the recorded request identity was stable, and the **first/last/min/max of `fetched`, `stored`, `skipped`, `missing` and `pages`** — so a different threshold can be applied by hand rather than only accepting the one below.
+
+Nine flags, each reachable from some input: `request_changed` (the recorded request identity differed, so an outcome difference is evidence about the request), `count_collapse` (fetched fell to at or below 0.5 of its peak across runs of the same request), `stored_nothing_once`, `stored_zero_while_fetched`, `returned_nothing`, `never_stored`, `always_truncated`, `no_record_hash`, `stale`.
+
+**What it detects is change and silence, never wrongness**, and the report says so every time:
+
+- **A failed run rolls back with its transaction and is never recorded**, so absence of a new run is not evidence that a source works. There is no `healthy` status and no `failed` flag, because the table cannot support either.
+- **No run records a hash of the records themselves.** 17 of 25 recording sites pass no `records_sha256` at all; the 8 that do hash counts and page metadata. A provider returning the same number of different records is invisible here.
+- **`request_sha256` is not uniformly a request hash** — `sanctions` stores the downloaded file's SHA-256 in it — so `request_changed` means the recorded request identity changed, which may be a query or a payload.
+- `never_stored` cannot distinguish a source with nothing to report from one that stopped answering; both readings are in the flag detail. `stale` cannot distinguish a source that stopped producing from an operator who stopped asking. `always_truncated` is a coverage statement, not a defect: the stored history is a prefix of what the provider offered, so `completeness` stays `unknown`.
+
+Measured on the research registry read-only: 15 runs, 11 sources, 12 series — `no_record_hash` on 10, `always_truncated` on 8, `never_stored` on 3, `stored_nothing_once` on 1. `AUDIT.md` §16 has the detail and the measured premise the item was built on.
+
 ## Retention cuts on stored price history (v19)
 
 `price_bars` and `move_events` grow for as long as a fetcher runs, so there is now a way to cut them that says what it did.

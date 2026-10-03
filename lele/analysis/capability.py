@@ -23,7 +23,7 @@ import sys
 from ..core import clock, constants
 from ..core.db import SCHEMA_VERSION
 from . import (causes, comparison, framework_notes, indicators, moves, prospective,
-               retention, signals, stationarity, volatility)
+               provider_health, retention, signals, stationarity, volatility)
 
 METHOD = "capability_summary_v1"
 MAX_COMMANDS = 500
@@ -183,6 +183,14 @@ def _taxonomy():
         "move_thresholds_percent": list(moves.DEFAULT_THRESHOLDS),
 "indicator_specs": sorted(indicators.INDICATOR_SPECS),
         "frozen_forecast_methods": list(prospective.METHODS),
+        "provider_health": {
+            "method": provider_health.METHOD,
+            "flags": list(provider_health.FLAGS),
+            "collapse_threshold": str(provider_health.COLLAPSE_FRACTION),
+            "default_stale_after_hours": provider_health.DEFAULT_STALE_HOURS,
+            "run_read_bound": provider_health.MAX_RUNS,
+            "cannot_detect": list(provider_health.NOT_A_CHECK),
+        },
         "retention": {
             "method": retention.METHOD,
             "pruned_tables": [item.table for item in retention.PLANNED],
@@ -466,6 +474,41 @@ def render_markdown(report):
         "measurement still mostly inside the retained history, and keeping it silently would "
         "leave a value no longer reproducible from what remains. Every applied cut is recorded "
         "with what it removed; the record states how many rows went, not what they contained.",
+        "",
+        "## Provider health",
+        "",
+        "What the recorded ingest runs say about what each source last returned to this "
+        "program. `lele providers` reports every series; `lele doctor` carries a reduced "
+        "block. A comparison is made only where the recorded request identity is unchanged, "
+        "and the raw first/last/min/max counts are published so a different threshold can be "
+        "applied by hand.",
+        "",
+        "| flag | what it means |",
+        "| --- | --- |",
+        "| `request_changed` | the recorded request identity differed, so an outcome "
+        "difference is evidence about the request and not the provider |",
+        "| `count_collapse` | fetched fell to at or below "
+        f"{report['taxonomy']['provider_health']['collapse_threshold']} of its peak across "
+        "runs of the same recorded request |",
+        "| `stored_nothing_once` | one run of the same recorded request stored nothing while "
+        "another stored rows; this cannot say whether the source or this program changed |",
+        "| `stored_zero_while_fetched` | the newest run fetched rows and stored none |",
+        "| `returned_nothing` | the newest run fetched nothing where an earlier one did not |",
+        "| `never_stored` | no recorded run stored a row, which a source with nothing to report "
+        "and a source that stopped answering both look like |",
+        "| `always_truncated` | every run was truncated, so stored coverage is a prefix of what "
+        "the provider offered |",
+        "| `no_record_hash` | the runs carry no record hash, so a content change cannot be "
+        "detected for this series |",
+        "| `stale` | the newest run is older than "
+        f"{report['taxonomy']['provider_health']['default_stale_after_hours']} hours, which is "
+        "either a source that stopped producing or an operator who stopped asking |",
+        "",
+        "It detects change and silence, never wrongness:",
+        "",
+    ]
+    lines += [f"- {item}" for item in report["taxonomy"]["provider_health"]["cannot_detect"]]
+    lines += [
         "",
         "## Allocation frameworks, recorded as citations",
         "",

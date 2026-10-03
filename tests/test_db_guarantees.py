@@ -166,6 +166,7 @@ class ReadDoesNotWrite(RegistryCase):
             "fetch-material": (["1"], False),
             "fetch-treasury": ([], False), "fetch-political": ([], False),
             "compare": (["1", "p.json"], True),
+            "providers": ([], True),
             "explain": (["1", "--from", "2026-01-01T00:00:00+00:00",
                          "--to", "2026-01-08T00:00:00+00:00"], True),
             "capital": (["1", "--from", "2026-01-01T00:00:00+00:00",

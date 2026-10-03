@@ -94,7 +94,7 @@ class CLITests(unittest.TestCase):
         self.assertFalse(self.db.exists())
         self.assertEqual(set(COMMANDS), {"init", "sources", "version", "kinds", "list", "show", "stats", "countries", "fetch", "fetch-prices", "fetch-evidence", "fetch-cot", "fetch-short", "fetch-news", "fetch-form4", "fetch-13f", "fetch-material", "fetch-formd", "fetch-nport", "fetch-awards", "fetch-lobbying", "fetch-treasury", "fetch-political", "fetch-formadv", "fetch-formadv-individual", "fetch-comtrade", "fetch-census-trade", "fetch-eia", "fetch-bls", "fetch-opensky", "runs", "edges", "import", "import-history", "analyze", "finmap", "project", "compare", "prospective", "worldstate", "rag", "indicators", "episodes", "events", "volatility-analyze", "fetch-history", "fetch-sentiment",
                       "fetch-stablecoins", "fetch-market-activity", "fetch-news-feed",
-"moves", "causes", "context", "prune", "scan", "explain", "capital",
+"moves", "causes", "context", "prune", "providers", "scan", "explain", "capital",
             "store-evidence",
                   "instruments", "volatility", "framework",
                   "sentiment", "relationships", "tree", "backup", "doctor", "resolve", "sanctions", "flows", "observations", "links", "export", "summary", "menu"})

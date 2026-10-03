@@ -1,5 +1,106 @@
 # Lele Worklog
 
+## Current handoff — provider health, and a queue item whose premise was half false (user-directed; resume here)
+
+**Queue item 3 is closed. 1045 tests, gate green.** The item asked for provider
+health monitoring on the `ingest_runs` hashes. Measuring the premise before
+building it was the most useful part of the round.
+
+**The premise was half false, and that decided what the feature may claim.**
+`DEVELOPMENT_PLAN.md` said the table "already records a request hash and a record
+hash per run". Measured over every call site with `ast`: **25 write a run, 17 pass
+no `records_sha256`, and the 8 that do hash counts and page metadata — never the
+records.** The live registry agrees: 11 of its 15 runs carry an empty
+`records_sha256`. So there is no content fingerprint anywhere in the table. A
+provider returning *different numbers* is visible; a provider returning the same
+number of *different records* is invisible to anything reading this table.
+
+**Built.** `lele/analysis/provider_health.py`, `lele providers`, and a reduced
+`providers` block in `lele doctor` so the answer is where a person already looks
+when something is wrong. Series are `(source, query, country, indicator,
+category)` — the key `latest_resumable_run` matches on — and each publishes run
+count, first/last start, age in hours, request-identity stability, and the
+first/last/min/max of `fetched`, `stored`, `skipped`, `missing` and `pages`.
+Nine flags, each reachable from some input: `request_changed`, `count_collapse`,
+`stored_nothing_once`, `stored_zero_while_fetched`, `returned_nothing`,
+`never_stored`, `always_truncated`, `no_record_hash`, `stale`.
+
+**Three rules.** Nothing is compared across a changed recorded request, and that
+is a *flag* rather than a silent guard, because a silent comparison would report
+the operator's own query change as the provider's behaviour. The collapse
+threshold (`0.5`) is published **beside the raw counts it fired on**, so a reader
+can apply a different one by hand rather than accept this one. A bound that hides
+data is reported: `run_read_bound_reached` and `series_bound_reached`.
+
+**What it cannot say, stated on every run rather than in a docstring.** A failed
+run rolls back with its transaction and is never recorded, so **absence of a new
+run is not evidence a source works**; there is no `healthy` status and no `failed`
+flag, and a test asserts that no field and no status value claims one while also
+asserting the sentence saying so is present. `request_sha256` is not uniformly a
+request hash — the four `sanctions.py` sites put the *file's* SHA-256 in it — so
+`request_changed` means the recorded request identity changed, which may be a query
+or a payload. `never_stored` cannot tell a source with nothing to report from one
+that stopped answering, and both readings are in the flag detail. `always_truncated`
+is a **coverage** statement, not a defect: the stored history is a prefix of what
+the provider offered.
+
+**Recorded in `AUDIT.md` §16**, including the measured premise table.
+
+**The specific next step, and it is a deliberate change rather than a side
+effect: record failed runs.** The failure row would have to be committed on a
+*different* connection from the transaction that rolled back, because `get_conn` is
+the only owner of commit and rollback and its rollback takes the row with it. That
+touches the invariant §3A2 fixed. It should be done on its own, with a test that a
+failed fetch leaves a run row **and** stores nothing.
+
+**Measured, live, read-only, on `~/.finworld/finworld.db`** (15 runs, 11 sources,
+12 series, all from 2026-09-20): `no_record_hash` on 10 series, `always_truncated` on
+8, `never_stored` on 3 (`sec-13f`, `sec-formd`, `sec-nport` on one issuer — Apple has
+no such filing, and that is exactly what a broken source looks like in this table),
+`stored_nothing_once` on 1 (`sec-formadv` individual: identical request, stored 0
+then 11). At the default 168-hour threshold all 12 also carry `stale`, which is the
+correct reading of a registry last fetched thirteen days ago. `lele doctor` carries
+the reduced block. **The research database was not written to.**
+
+**Tests.** `tests/test_provider_health.py`, 32 offline tests pinning contracts: an
+empty registry reports `no_recorded_runs` rather than no problems; a source wobbling
+by ten percent is **not** flagged; a changed request identity stops the comparison
+and says so; the collapse flag carries peak, latest, ratio and threshold; a bound
+that hid runs is reported; a run with an unreadable timestamp has no invented age
+and is counted outside a window rather than dropped; every flag name is reachable;
+no status claims healthy or failing; `doctor` reports an unreadable run table as
+classified rather than echoing an exception; and the report survives
+`json.dumps(allow_nan=False)`.
+
+**Verified.** `.tools/check.sh` unpiped, redirected to a file: 1045 tests, import,
+compileall, ruff on package and tests, mypy over 62 files, the connection guarantee
+under `ResourceWarning` as an error.
+
+**Two defects of my own, caught before the gate rather than by review.** The CLI
+fingerprint helper in the new test file leaked a file handle — the same
+`ResourceWarning`-as-error family as §15.2, and it would have failed an unrelated
+test exactly as that one did. And `doctor`'s provider block caught only
+`RegistryError` and put its message into an `error` field, so a `sqlite3` failure
+fell through to a bare "database error" with no block at all; it now classifies both
+and says no source is reported in either direction. A third finding is the §3G1 rule
+again: the first version *did* put a raw exception message in the report, and the
+test now asserts there is no `error` field at all.
+
+**Precise next task.** Record failed ingest runs (above). Then the type annotations
+(measured 2026-10-03: **612 of 743** functions in `lele/` still lack a complete
+signature), keyless non-Binance ingestion, the persistent watchlist and the
+HAR-log forecasting half.
+
+**Do not** lower the 0.9 constant, invent a contact email or API key, defeat the
+Stooq or Yahoo access controls, emit a buy/sell/hold signal, or ship an in-sample
+performance figure without an out-of-sample protocol and a cost model. The evidence
+against each is in `AUDIT.md` §11.
+
+**Do not** commit `session-ses_f08b.md`: it is a tooling transcript, untracked and
+not gitignored, and it is not part of this project.
+
+---
+
 ## Current handoff — retention cuts, and three defects that were already in the tree (user-directed; resume here)
 
 **Queue item 2 is closed. Schema v19. 1013 tests, gate green.** The planned work

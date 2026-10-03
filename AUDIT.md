@@ -1146,3 +1146,149 @@ figure above came from a copy with the outputs left under `/tmp/1a/`.
 - The registry cannot know what it never fetched. A recorded cut tells a reader
   that history was removed; it says nothing about the period before the first bar a
   bounded fetch reached, which is why `completeness` stays `unknown`.
+
+## 16. Provider health, and a plan item whose premise was half false
+
+Queue item 3 since the reliability audit: "`ingest_runs` already records a request
+hash and a record hash per run. Nothing consumes them." It is now consumed, and the
+first thing building it did was measure the premise, which turns out to be half
+false and to decide what the feature can honestly claim.
+
+### 16.1 The record hash is mostly not there, and where it is, it is not a record hash
+
+Measured over every `record_ingest_run` call site with `ast`, 2026-10-03:
+
+| | count |
+| --- | --- |
+| call sites writing a run | 25 |
+| passing `records_sha256` | **8** |
+| passing none | **17** |
+
+And of the eight, none hashes the records. `sources.py` hashes
+`{fetched, stored, total, pages}`; `history.py` and `price_import.py` hash the
+`pages_detail` metadata; all four `sanctions.py` sites hash
+`{fetched, pages, stored}`. So there is **no content fingerprint anywhere in the
+table**, and the live registry bears that out: 11 of its 15 runs carry an empty
+`records_sha256`.
+
+The consequence is not cosmetic. A provider that starts returning *different
+numbers* is visible. A provider that returns the same number of *different records*
+is invisible to any consumer of this table, and no amount of reading it changes
+that. The monitor therefore promises one thing and says it in its own output:
+**it detects change and silence, never wrongness.**
+
+`request_sha256` is real and is the column that makes a comparison mean anything —
+two runs that asked the same thing and got different answers are evidence about the
+provider; two runs that asked different things are evidence about nothing. It is
+also not uniformly a request hash: the four `sanctions.py` sites store the
+*downloaded file's* SHA-256 in it. So `request_changed` is defined as "the recorded
+request identity changed", which covers both, and the report says so rather than
+assuming a query changed.
+
+### 16.2 The blind spot the monitor cannot close, stated on every run
+
+A failed run rolls back with its transaction and is never recorded — D01's own
+acceptance criterion, and `lele runs` has always said it. So **absence of a new run
+is not evidence that a source works**, and nothing in this report can call a source
+failing or healthy. There is no `healthy` status and no `failed` flag, and
+`tests/test_provider_health.py` asserts that no field and no status value claims
+one, while separately asserting that the sentence saying so is present.
+
+Recording failures is the obvious next step and is **not** built here, for a reason
+worth stating: the failure row would have to be committed on a different connection
+than the one whose transaction rolled back, because `get_conn` is the only owner of
+commit and rollback and its rollback takes the failure row with it. That is a change
+to the transaction-ownership invariant this audit fixed in §3A2, and it should be
+done deliberately rather than as a side effect of a monitoring feature.
+
+### 16.3 What was built
+
+`lele/analysis/provider_health.py`, `lele providers`, and a reduced block in
+`lele doctor` so the answer is somewhere a person looks when something is wrong
+rather than a command they have to remember. Groups runs by
+`(source, query, country, indicator, category)` — the same key `latest_resumable_run`
+matches on — and publishes, per series: run count, first and last start, age in
+hours, whether the recorded request identity was stable across the window, the
+first/last/min/max of `fetched`, `stored`, `skipped`, `missing` and `pages`, the
+truncated-run count, and the union of recorded warnings.
+
+Nine flags, each reachable from some input, which a test asserts because a flag
+nothing can raise is one a reader cannot rely on being told: `request_changed`,
+`count_collapse`, `stored_nothing_once`, `stored_zero_while_fetched`,
+`returned_nothing`, `never_stored`, `always_truncated`, `no_record_hash`, `stale`.
+
+Three rules govern every comparison:
+
+1. **Nothing is compared across a different recorded request.** Stated as a flag
+   rather than applied silently, because a silent comparison would report the
+   operator's own query change as a provider's behaviour.
+2. **A heuristic threshold is named and published beside the numbers it fired on.**
+   `COLLAPSE_FRACTION` is `0.5`, a rule of thumb for a fetched count that fell
+   sharply — not a verdict about a provider — and the first/last/min/max counts are
+   always in the output so a reader can apply a different one by hand.
+3. **A bound that hides data is reported.** The run read is capped at
+   `MAX_RUNS = 1000` and `run_read_bound_reached` says whether a full page came
+   back, because "this source has no runs" and "this source's runs fell outside the
+   bound" are different claims. The series bound is reported the same way.
+
+`always_truncated` is worth separating from the rest: it is not a fault. A run
+recorded as truncated stored a *prefix* of what the provider offered, so the flag's
+detail says coverage is partial by construction and `completeness` stays `unknown`.
+
+`stored_nothing_once` is the one flag about the past rather than the current shape:
+the same recorded request once stored nothing and later stored rows. It is kept
+because the request was identical both times, so either the provider or this program
+changed and the table cannot say which — and it is why the sec-formadv pair in the
+live registry is visible at all.
+
+### 16.4 Measured, on the research registry, read-only
+
+`lele providers --stale-after-hours 720` against `~/.finworld/finworld.db` (15 runs,
+11 sources, 12 series, all from 2026-09-20):
+
+| flag | series |
+| --- | --- |
+| `no_record_hash` | 10 |
+| `always_truncated` | 8 |
+| `never_stored` | 3 (`sec-13f`, `sec-formd`, `sec-nport` on one issuer) |
+| `stored_nothing_once` | 1 (`sec-formadv` individual: stored 0 then 11 on an identical request) |
+
+At the default 168-hour staleness threshold all 12 series also carry `stale`, which
+is the correct reading of a registry last fetched on 2026-09-20 and is stated as
+"either a source that stopped producing or an operator who stopped asking" rather
+than as a fault.
+
+The three `never_stored` series are the honest case: Apple has no 13F, Form D or
+N-PORT filing for that issuer, and a source with nothing to report is exactly what a
+source that stopped answering looks like in this table. The flag says both, and does
+not choose.
+
+`lele doctor` on the same registry now carries
+`{"sources": 11, "series": 12, "runs_considered": 15, "flagged_series": 12,
+"flags": {...}}` and the same six "what this is not" lines.
+
+### 16.5 Tests
+
+`tests/test_provider_health.py`, 32 offline tests pinning contracts rather than
+values: an empty registry reports `no_recorded_runs` rather than no problems; the
+raw counts are published beside the threshold that fired; a source wobbling by ten
+percent is **not** flagged; a changed request identity stops the comparison and says
+so; the collapse flag carries its peak, latest, ratio and threshold; a bound that
+hid runs is reported; a run with an unreadable timestamp has no invented age and is
+counted as outside a window rather than dropped; every flag name is reachable; no
+field or status claims a source healthy or failing; the failure blind spot is stated
+every time; the report survives `json.dumps(allow_nan=False)`; and the CLI command
+writes nothing while `doctor` reports an unreadable run table as classified rather
+than echoing an exception.
+
+### 16.6 What this does not establish
+
+- Nothing here says a provider is correct, and nothing here could. The table has no
+  content hash and no ground truth.
+- Nothing here says a provider is *failing*. It cannot see a failure.
+- `never_stored` and `returned_nothing` cannot distinguish an empty source from a
+  broken one. Both readings are in the flag detail.
+- Staleness cannot distinguish a source that stopped producing from an operator who
+  stopped asking.
+- `always_truncated` is a coverage statement, not a defect, and it is a claim about
+  the *stored prefix*, never about what the provider holds.
