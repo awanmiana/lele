@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, UTC
 from decimal import Decimal
 
 from lele.analysis import causes, events, signals, stationarity, volatility
-from lele.core import registry
+from lele.core import db, registry
 
 KEY = "binance:BTCUSDT"
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
@@ -70,7 +70,7 @@ class SeriesReadingTests(unittest.TestCase):
     """What `stored_series` accepts, and what it refuses by name."""
 
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry._initialize(self.conn)
         self.addCleanup(self.conn.close)
@@ -143,7 +143,7 @@ class SeriesReadingTests(unittest.TestCase):
 class ChangeMeasureTests(unittest.TestCase):
 
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry._initialize(self.conn)
         self.addCleanup(self.conn.close)
@@ -224,7 +224,7 @@ class ChangeMeasureTests(unittest.TestCase):
 class ZScoreMeasureTests(unittest.TestCase):
 
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry._initialize(self.conn)
         self.addCleanup(self.conn.close)
@@ -319,7 +319,7 @@ class VocabularyTests(unittest.TestCase):
         self.assertEqual(set(stationarity.NOT_OFFERED) & set(stationarity.MEASURES), set())
 
     def _registry(self):
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", factory=db.Connection)
         conn.row_factory = sqlite3.Row
         self.addCleanup(conn.close)
         registry._initialize(conn)
@@ -410,7 +410,7 @@ class VocabularyTests(unittest.TestCase):
 class StoredRowTests(unittest.TestCase):
 
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry._initialize(self.conn)
         self.addCleanup(self.conn.close)
@@ -484,7 +484,7 @@ class StoredRowTests(unittest.TestCase):
 class WindowReadingTests(unittest.TestCase):
 
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry._initialize(self.conn)
         self.addCleanup(self.conn.close)
@@ -544,7 +544,7 @@ class WindowReadingTests(unittest.TestCase):
 class ReportTests(unittest.TestCase):
 
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry._initialize(self.conn)
         self.addCleanup(self.conn.close)
@@ -573,7 +573,7 @@ class ProfileIntegrationTests(unittest.TestCase):
     """The measure comparison is the same test as the level one, beside it."""
 
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry._initialize(self.conn)
         self.addCleanup(self.conn.close)

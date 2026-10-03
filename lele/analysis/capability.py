@@ -20,7 +20,7 @@ import platform
 import sqlite3
 import sys
 
-from ..core import clock, constants
+from ..core import clock, constants, registry
 from ..core.db import SCHEMA_VERSION
 from . import (causes, comparison, framework_notes, indicators, moves, prospective,
                provider_health, retention, signals, stationarity, volatility)
@@ -190,6 +190,8 @@ def _taxonomy():
             "default_stale_after_hours": provider_health.DEFAULT_STALE_HOURS,
             "run_read_bound": provider_health.MAX_RUNS,
             "cannot_detect": list(provider_health.NOT_A_CHECK),
+            "failure_recording_commands": list(provider_health.FAILURE_RECORDING_COMMANDS),
+            "failure_reasons": dict(sorted(registry.FAILURE_REASONS.items())),
         },
         "retention": {
             "method": retention.METHOD,
@@ -508,7 +510,14 @@ def render_markdown(report):
         "",
     ]
     lines += [f"- {item}" for item in report["taxonomy"]["provider_health"]["cannot_detect"]]
+    health = report["taxonomy"]["provider_health"]
     lines += [
+        "",
+        f"Commands recording a failed run, outside the transaction that rolls back: "
+        f"{', '.join(f'`{name}`' for name in health['failure_recording_commands'])}. A failure "
+        "is recorded with a classified reason and the exception's class name, never its "
+        "message. The reasons a failure can be recorded under: "
+        + ", ".join(f"`{name}`" for name in health["failure_reasons"]) + ".",
         "",
         "## Allocation frameworks, recorded as citations",
         "",

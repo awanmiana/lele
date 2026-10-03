@@ -15,7 +15,7 @@ from datetime import datetime
 from decimal import (Context, Decimal, InvalidOperation, ROUND_HALF_EVEN,
                    localcontext)
 
-from ..core import db
+from ..core import clock, db
 from ..core.schema import SCHEMA_VERSION as _SCHEMA_DDL_VERSION
 from ..core.schema import _SCHEMA as _SCHEMA_DDL
 
@@ -2138,7 +2138,7 @@ def find_pattern_matches(conn, current_volatility_id: int,
     return [dict(row) for row in rows]
 
 
-def record_ingest_run(conn, source: str, started_at: str, finished_at: str, *, query: str = "",
+def _write_ingest_run(conn, source: str, started_at: str, finished_at: str, *, query: str = "",
                       country: str = "", indicator: str = "", category: str = "",
                       fetched: int = 0, stored: int = 0, skipped: int = 0, missing: int = 0,
                       pages: int = 0, total: int | None = None, truncated: bool = False,
@@ -2158,6 +2158,107 @@ def record_ingest_run(conn, source: str, started_at: str, finished_at: str, *, q
          json.dumps(list(pages_detail or []), ensure_ascii=True, sort_keys=True)),
     )
     return int(cursor.lastrowid)
+
+
+def record_ingest_run(conn, source: str, started_at: str, finished_at: str, **fields) -> int:
+    return _write_ingest_run(conn, source, started_at, finished_at, **fields)
+
+
+#: How a failure is named in a run row. The exception's own message is never
+#: recorded or echoed: it can carry a token, a password or a response body, and the
+#: rule that a classified message replaces it applies here as much as it does on the
+#: console. The type name is kept because "which class of failure" is diagnostic and
+#: "what it said" is not safe.
+FAILURE_REASONS = {
+    "source_request": "the source request failed or was refused",
+    "database": "the registry rejected or could not complete the work",
+    "file": "a file or directory could not be read or written",
+    "data": "the data did not pass validation",
+    "cancelled": "the operation was cancelled",
+    "unexpected": "a defect in this program rather than a bad input",
+}
+
+
+def classify_failure(error: BaseException) -> tuple[str, str]:
+    """The reason a failure is recorded under, and the exception's class name.
+
+    Two things come back and neither is the message. The reason is drawn from a
+    closed vocabulary so a run row says the same thing about the same kind of
+    failure every time; the class name says which one it was without saying what it
+    contained. A test asserts a secret planted in the message reaches neither.
+    """
+    import sqlite3 as _sqlite3
+    from urllib.error import URLError as _URLError
+    name = type(error).__name__
+    if isinstance(error, (KeyboardInterrupt, EOFError)):
+        return "cancelled", name
+    if isinstance(error, _sqlite3.Error):
+        return "database", name
+    if isinstance(error, (OSError, _URLError)):
+        return "file" if isinstance(error, OSError) else "source_request", name
+    if isinstance(error, (ValueError, UnicodeError, OverflowError, RecursionError)):
+        return "data", name
+    try:
+        from ..fetchers.http import SourceError
+        if isinstance(error, SourceError):
+            return "source_request", name
+    except ImportError:  # pragma: no cover - the fetchers always import cleanly
+        pass
+    return "unexpected", name
+
+
+def record_failed_run(conn, *, error: BaseException, source: str, started_at: str,
+                      query: str = "", country: str = "", indicator: str = "",
+                      category: str = "", request_sha256: str = "", finished_at: str = "",
+                      now=None) -> dict:
+    """Write the one row that says a fetch failed.
+
+    The reason comes from `FAILURE_REASONS` and the exception's class name is kept.
+    Its **message never is**: it can carry a token, a password or a response body,
+    and the rule that a classified message replaces the raw one applies here as much
+    as it does on the console.
+
+    It commits nothing. `get_conn` owns every commit, and it calls this *after* it
+    has rolled the failed session back, precisely so this row is not discarded along
+    with the rows the fetch wrote. Returns what happened, because a caller has to be
+    able to report that the failure was not recorded.
+    """
+    reason, name = classify_failure(error)
+    finished = finished_at or (now if now is not None else clock.now()).isoformat()
+    run_id = _write_ingest_run(
+        conn, source, started_at, finished, query=query, country=country,
+        indicator=indicator, category=category, request_sha256=request_sha256,
+        status="failed", coverage=f"{reason}: {name}", warnings=[f"{reason}: {name}"])
+    return {"recorded": True, "run_id": run_id, "reason": reason, "error_class": name}
+
+
+def failed_run(*, source: str, started_at: str, **fields):
+    """A recorder for `get_conn`: one argument, the connection, after the rollback.
+
+    Built with `partial`-style closure rather than an exception argument so a caller
+    registers a small named thing rather than a lambda, and so the exception always
+    comes from the session that failed.
+    """
+    def recorder(conn) -> None:
+        record_failed_run(conn, error=getattr(conn, "lele_failure", None) or
+                          RuntimeError("an unnamed failure"), source=source,
+                          started_at=started_at, **fields)
+    return recorder
+
+
+def set_failure_recorder(conn, recorder) -> bool:
+    """Register what to record if this session fails. See `get_conn`.
+
+    Returns whether it was registered, because a plain `sqlite3.Connection` has no
+    instance dictionary and cannot carry it — a test or an embedder may hold one, and
+    the fetch must work on it. A caller that cannot register gets told so in its
+    result rather than losing the capability silently.
+    """
+    try:
+        conn.lele_failure_recorder = recorder
+    except AttributeError:
+        return False
+    return True
 
 
 def _decode_ingest_run(row) -> dict:

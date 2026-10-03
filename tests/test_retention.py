@@ -132,7 +132,7 @@ def counts(conn):
 class RegistryCase(unittest.TestCase):
 
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry._initialize(self.conn)
         self.addCleanup(self.conn.close)

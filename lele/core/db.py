@@ -58,15 +58,21 @@ BUSY_TIMEOUT_MS = 30000
 
 
 class Connection(sqlite3.Connection):
-    """A connection that can carry its own path and read-only flag.
+    """A connection that can carry its own path, read-only flag and failure recorder.
 
     `sqlite3.Connection` has no instance dictionary, so the session facts that
-    reporting needs have to live on the type.
+    reporting and the transaction owner need have to live on the type.
     """
 
     lele_path: str = ""
     lele_readonly: bool = False
     lele_readonly_reason: str = ""
+    #: Set by a caller that wants a failure recorded outside the rolled-back
+    #: transaction. See `get_conn`, which calls it after the rollback and owns the
+    #: commit. None means nothing is registered.
+    lele_failure_recorder: object = None
+    #: The exception the recorder is being called for, set for the same reason.
+    lele_failure: object = None
 
 
 class RegistryError(ValueError):
@@ -519,15 +525,41 @@ def init_db(db_path: str | None = None) -> None:
 
 
 @contextmanager
-def get_conn(db_path: str | None = None) -> Iterator[Connection]:
-    """Read-write session. The single owner of commit and rollback."""
+def get_conn(db_path: str | None) -> Iterator[Connection]:
+    """Read-write session. The single owner of commit and rollback.
+
+    A caller may register `conn.lele_failure_recorder` before the risky part of its
+    work. If the work fails, this rolls back first — so every row the work wrote is
+    discarded — and then calls the recorder and commits *its* rows. That is the one
+    case where a row survives a rollback, and it exists so a fetch that failed can
+    leave a record that it failed: with the row inside the transaction, the run
+    history can never record a failure at all, and every source that stops answering
+    looks identical to one that was never asked.
+
+    The recorder is called with `(conn, exception)` after the rollback and is
+    responsible for nothing but its own writes: this owns the commit, so the rule
+    that one place owns every commit is kept rather than bent. A recorder that
+    raises is swallowed and the original exception is raised unchanged, because a
+    failure to *record* a failure must not replace the failure.
+    """
     conn = connect(db_path)
     try:
         initialize(conn)
         yield conn
         conn.commit()
-    except BaseException:
+    except BaseException as exc:
         conn.rollback()
+        recorder = getattr(conn, "lele_failure_recorder", None)
+        conn.lele_failure_recorder = None
+        if recorder is not None:
+            conn.lele_failure = exc
+            try:
+                recorder(conn)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+            finally:
+                conn.lele_failure = None
         raise
     finally:
         conn.close()

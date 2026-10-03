@@ -966,6 +966,21 @@ The derived rows go in a new **`context_measures` table (schema v18), not in `ob
 
 Stationarity removes one confound. It does not make any context series a cause of a move, and it does not touch the saturated 24-hour pre-window: every wired context source is daily. `AUDIT.md` §14 records the built layer and the two defects found while building it.
 
+## A failed fetch leaves a row (v19)
+
+A run row exists for every fetch that reached the request stage, including the ones that failed. Before this, a failed fetch rolled its transaction back and left nothing — so a source that stopped answering and one that was never asked looked identical, and `lele providers` could report silence but never failure.
+
+```bash
+lele runs                       # the recorded runs, including failed ones
+lele providers                  # failed_runs and the recorded_failure flag per series
+```
+
+The row is written **outside** the transaction it rolls back, which sounds like a contradiction and is not: `get_conn` rolls back first, so every row the fetch wrote is discarded, and *then* it writes and commits the row saying the fetch failed. One connection, one place that commits. A recorder that fails is swallowed and the original error still propagates — a failure to record a failure never replaces the failure.
+
+A failure is recorded as `status: failed` with the request identity and query scope it was attempting, a reason from a closed vocabulary (`source_request`, `database`, `file`, `data`, `cancelled`, `unexpected`) and the exception's **class name**. Never its message: an exception message can carry a token or a password, and the rule that a classified message replaces the raw one applies to a database row as much as to the console. A test plants a secret in six exception types and asserts it reaches no column.
+
+**Only `fetch` records failures so far.** The `fetch-*` extractors — Form 4, 13F, N-PORT, USAspending, LDA, Treasury, EIA, OpenSky, sanctions — still leave no row, and `lele providers` says so in `failure_recording_note` rather than implying coverage. The list is `FAILURE_RECORDING_COMMANDS`, quoted by `lele summary` and checked against the command table by a test, so adopting a fetcher is a two-line change and the list is the checklist. `AUDIT.md` §17 has the design and the two that could not work.
+
 ## Provider health: what the recorded runs say (v19)
 
 `lele providers` reads the durable ingest runs and says which sources changed shape. `lele doctor` carries a reduced block, so the answer is where you look when something is already wrong.

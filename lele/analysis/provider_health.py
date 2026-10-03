@@ -78,6 +78,7 @@ DEFAULT_STALE_HOURS = 168
 #: Named reasons a series is flagged. Each is reachable from some input, which a
 #: test asserts, because a flag nothing can raise is one a reader cannot rely on.
 FLAGS = (
+    "recorded_failure",
     "request_changed",
     "count_collapse",
     "stored_nothing_once",
@@ -89,14 +90,25 @@ FLAGS = (
     "stale",
 )
 
+#: Commands that record a failed run. A failure has to be written outside the
+#: transaction it rolls back, so a command adopts it deliberately rather than by
+#: accident, and the list is machine-checked against the command table: a name here
+#: that is not a fetch command, or that no longer exists, fails a test.
+#: `fetch` adopted it on 2026-10-03. The `fetch-*` extractors have not, and a failure
+#: in one of those leaves no row, which is why this list is published rather than
+#: assumed to cover every source.
+FAILURE_RECORDING_COMMANDS = ("fetch",)
+
 #: What this monitor is, stated in its own output rather than only here.
 NOT_A_CHECK = (
     "This is not a health check of a provider. It reports what the recorded runs say "
     "about what a source last returned to this program, which is a different thing from "
     "whether the provider is correct.",
-    "A failed run rolls back with its transaction and is never recorded, so a source that "
-    "errors leaves no trace here. Absence of a new run is not evidence that a source works, "
-    "and nothing in this report can call a source failing or healthy.",
+    "A failed run of `fetch` is recorded, with a classified reason and the exception's class "
+    "name and never its message. The `fetch-*` extractors do not record one yet, so a failure "
+    "in those leaves no trace here and this monitor is blind to it. Absence of a new run is "
+    "still not evidence that a source works, and nothing in this report can call a source "
+    "failing or healthy.",
     "No run records a hash of the records themselves: 17 of 25 recording sites pass no "
     "records_sha256 and the rest hash counts and page metadata. A provider returning the "
     "same number of different records is invisible here.",
@@ -241,6 +253,19 @@ def _series(key: tuple, runs: list[dict], *, stale_after: Decimal, now) -> dict:
              "report, which is either a source that stopped producing or an operator who "
              "stopped asking",
              last_run=_iso(last), age_hours=str(age), stale_after_hours=str(stale_after))
+    failures = [row for row in ordered if row.get("status") not in ("", None, "completed")]
+    failure_notes = sorted({row.get("coverage") or "" for row in failures if row.get("coverage")})
+    if failures:
+        newest_failure = max((_time(row.get("started_at", "")) or datetime.min.replace(tzinfo=UTC)
+                              for row in failures), default=None)
+        flag("recorded_failure",
+             f"{len(failures)} of {len(ordered)} recorded runs for this series failed; the "
+             "newest started "
+             + (_iso(newest_failure) or "at an unreadable time")
+             + ". A recorded failure is a fact about one attempt, not a verdict about the "
+               "source, and the rows it wrote were rolled back",
+             failed_runs=len(failures), newest_failure=_iso(newest_failure),
+             reasons=failure_notes[:MAX_SERIES])
     warnings: list[str] = []
     for row in ordered:
         for warning in row.get("warnings") or []:
@@ -265,6 +290,8 @@ def _series(key: tuple, runs: list[dict], *, stale_after: Decimal, now) -> dict:
         "missing": _spread(missing),
         "pages": _spread(pages),
         "truncated_runs": truncated,
+        "failed_runs": len(failures),
+        "failure_reasons": failure_notes,
         "warnings": warnings,
         "flags": flags,
     }
@@ -338,6 +365,7 @@ def report(conn, *, source: str = "", since_hours: int = 0,
                                                    else "no_flags"),
         "collapse_threshold": str(COLLAPSE_FRACTION),
         "flags_named": list(FLAGS),
+        "failure_recording_commands": list(FAILURE_RECORDING_COMMANDS),
         "what_this_is": "what the recorded ingest runs say about what each source last "
                         "returned to this program, compared only across an unchanged recorded "
                         "request",
@@ -346,6 +374,11 @@ def report(conn, *, source: str = "", since_hours: int = 0,
         "completeness_note": "a bounded run history cannot show that a source has nothing else "
                              "to report, and a source absent from it may be one this registry "
                              "never fetched",
+        "failure_recording_note": "commands recording a failed run: "
+                                  + ", ".join(FAILURE_RECORDING_COMMANDS)
+                                  + ". Every other fetch command rolls its failure back with its "
+                                    "transaction and leaves no row, so this report says nothing "
+                                    "about whether it worked",
     }
 
 

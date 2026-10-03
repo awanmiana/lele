@@ -9,13 +9,15 @@ having no runs.
 """
 import io
 import json
-import sqlite3
+import os
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 from lele.analysis import provider_health
+from lele.fetchers.http import SourceError
 from lele.cli.main import main
 from lele.core import db, registry
 
@@ -38,20 +40,36 @@ def run(conn, *, source="opensky", query="all states", fetched=100, stored=10, s
     17 of the 25 real recording sites behave.
     """
     moment = started if started is not None else NOW - timedelta(hours=1)
-    return registry.record_ingest_run(
+    run_id = registry.record_ingest_run(
         conn, source=source, started_at=iso(moment), finished_at=iso(moment),
         query=query, country=country, indicator=indicator, category=category,
         fetched=fetched, stored=stored, skipped=skipped, missing=missing, pages=pages,
         truncated=truncated, request_sha256=request,
         records_sha256=records, warnings=warnings or [])
+    # Committed because these registries are files: an uncommitted write here holds
+    # the database's write lock, and `record_failed_run` opens a second connection on
+    # purpose. It would report "not recorded" and this test would be measuring the
+    # lock rather than the behaviour.
+    conn.commit()
+    return run_id
 
 
 class RegistryCase(unittest.TestCase):
+    """File-backed, because one thing under test cannot happen in memory.
+
+    A recorded failure has to be written on a second connection so it outlives the
+    rollback that discards the failed fetch, and an in-memory registry has no second
+    connection to write through. Using a file everywhere keeps these cases on the
+    path a real registry takes; the in-memory refusal is tested where it belongs, in
+    `tests/test_failed_runs.py`.
+    """
 
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
-        self.conn.row_factory = sqlite3.Row
-        registry._initialize(self.conn)
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.path = os.path.join(self._directory.name, "registry.db")
+        db.init_db(self.path)
+        self.conn = db.connect(self.path)
         self.addCleanup(self.conn.close)
 
     def report(self, **kwargs):
@@ -119,6 +137,29 @@ class Flags(RegistryCase):
     def names(self, **kwargs):
         return {entry["flag"] for row in self.report(stale_after_hours=0, **kwargs)["series"]
                 for entry in row["flags"]}
+
+    def test_a_recorded_failure_is_reported_as_a_fact_about_one_attempt(self):
+        run(self.conn, fetched=100, stored=10, started=NOW - timedelta(hours=2))
+        registry.record_failed_run(
+            self.conn, source="opensky", query="all states", error=SourceError("token=SECRET"),
+            started_at=iso(NOW - timedelta(hours=1)))
+        self.conn.commit()
+        series = self.report(stale_after_hours=0)["series"][0]
+        self.assertEqual(series["failed_runs"], 1)
+        names = [entry["flag"] for entry in series["flags"]]
+        self.assertIn("recorded_failure", names)
+        entry = series["flags"][names.index("recorded_failure")]
+        self.assertIn("not a verdict about the source", entry["detail"])
+        self.assertNotIn("SECRET", json.dumps(series))
+        self.assertNotIn("SECRET", json.dumps(entry["reasons"]))
+
+    def test_a_failure_recording_command_must_be_a_real_fetch_command(self):
+        """The list is machine-checked: a name that is not a fetch command, or that
+        no longer exists, would claim a coverage this project does not have."""
+        from lele.cli.main import COMMANDS
+        self.assertEqual(set(provider_health.FAILURE_RECORDING_COMMANDS) - set(COMMANDS), set())
+        for command in provider_health.FAILURE_RECORDING_COMMANDS:
+            self.assertTrue(command.startswith("fetch"), command)
 
     def test_a_changed_recorded_request_stops_the_comparison_being_made(self):
         run(self.conn, fetched=500, request="req-1", started=NOW - timedelta(hours=2))
@@ -210,6 +251,7 @@ class Flags(RegistryCase):
             "always_truncated": [dict(truncated=True), dict(truncated=True)],
             "no_record_hash": [dict(records="")],
             "stale": [dict(started=NOW - timedelta(hours=100))],
+            "recorded_failure": [dict(fetched=100, stored=10)],
         }
         triggered: dict = {}
         for name, steps in scenarios.items():
@@ -218,6 +260,11 @@ class Flags(RegistryCase):
                 # Oldest first, so the last step is the run a "latest" flag reads.
                 run(conn, **dict({"started": NOW - timedelta(hours=len(steps) - index)},
                                  **step))
+            if name == "recorded_failure":
+                registry.record_failed_run(
+                    conn, source="opensky", query="all states", error=ValueError("SECRET"),
+                    started_at=iso(NOW))
+                conn.commit()
             with self.subTest(flag=name):
                 flags = {entry["flag"] for row in
                          provider_health.report(conn, now=NOW,
@@ -228,10 +275,12 @@ class Flags(RegistryCase):
         self.assertEqual(set(provider_health.FLAGS) - set(triggered), set())
 
     def _fresh(self):
-        """A separate in-memory registry, so one scenario cannot prime another."""
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        registry._initialize(conn)
+        """A separate file-backed registry, so one scenario cannot prime another."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = os.path.join(directory.name, "registry.db")
+        db.init_db(path)
+        conn = db.connect(path)
         self.addCleanup(conn.close)
         return conn
 
@@ -276,8 +325,9 @@ class WhatItRefusesToSay(RegistryCase):
         run(self.conn)
         report = self.report()
         joined = " ".join(report["what_this_is_not"]).lower()
-        self.assertIn("a failed run rolls back with its transaction and is never recorded",
-                      joined)
+        self.assertIn("a failed run of `fetch` is recorded", joined)
+        self.assertIn("the `fetch-*` extractors do not record one yet", joined)
+        self.assertIn("absence of a new run is still not evidence that a source works", joined)
         self.assertIn("no run records a hash of the records themselves", joined)
         self.assertEqual(report["what_this_is_not"], list(provider_health.NOT_A_CHECK))
 
@@ -333,17 +383,18 @@ class Sources(RegistryCase):
 
 
 class CommandLineAndDoctor(unittest.TestCase):
+    """Its own file, written and closed, so no write handle is held while the CLI runs."""
 
     def setUp(self):
-        import os
-        import tempfile
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.path = os.path.join(directory.name, "registry.db")
         db.init_db(self.path)
         with registry.get_conn(self.path) as conn:
-            run(conn, source="opensky", fetched=500, stored=5, started=NOW - timedelta(hours=30))
-            run(conn, source="opensky", fetched=10, stored=1, started=NOW - timedelta(hours=29))
+            run(conn, source="opensky", fetched=500, stored=5,
+                started=NOW - timedelta(hours=30))
+            run(conn, source="opensky", fetched=10, stored=1,
+                started=NOW - timedelta(hours=29))
 
     def test_providers_through_the_cli_writes_nothing(self):
         import hashlib
@@ -374,7 +425,8 @@ class CommandLineAndDoctor(unittest.TestCase):
         self.assertEqual(block["sources"], 1)
         self.assertEqual(block["flagged_series"], 1)
         self.assertEqual(block["worst"][0]["source"], "opensky")
-        self.assertIn("A failed run rolls back", " ".join(block["what_this_is_not"]))
+        self.assertIn("A failed run of `fetch` is recorded",
+                      " ".join(block["what_this_is_not"]))
 
     def test_doctor_reports_provider_health_as_unreadable_rather_than_omitting_it(self):
         with registry.get_conn(self.path) as conn:

@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
+from lele.core import db
 from lele.core.constants import OSFI_DATASET_URL, OSFI_RESOURCE_ID, SOURCES
 from lele.core.registry import _SCHEMA, entity_payload, upsert_entity
 from lele.fetchers import http, sources
@@ -33,7 +34,9 @@ def page(rows, total=None, estimated=False):
 
 class OSFITests(unittest.TestCase):
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        # The project's connection type, so the fetch can register a failure recorder
+        # the way every real caller's connection lets it.
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(_SCHEMA)

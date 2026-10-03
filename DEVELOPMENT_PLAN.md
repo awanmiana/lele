@@ -96,8 +96,13 @@ the premise behind it was half true: the record hash it was to consume is absent
 17 of 25 run-recording sites and is a count hash where present, so the monitor
 detects change and silence and says so. See `AUDIT.md` §16.
 
+**Failed-run recording was added 2026-10-03**, closing the blind spot §16 named.
+A first design used a second connection and could not work, because a fetch that
+stored anything holds the write lock; the design that works has the transaction
+owner roll back first and then commit the recorder's rows. See `AUDIT.md` §17.
+
 **The next queue, in order.** Items 1, 1a, the capability summary, 2 and 3 are
-closed above; the rest are unchanged.
+closed above, as is failed-run recording; the rest are unchanged.
 
 1. **Re-establish the M04/M05 enrichment results on the corrected detector.**
    **CLOSED 2026-10-02, recorded in `AUDIT.md` §12.** Kept in the list so the reason
@@ -155,10 +160,17 @@ closed above; the rest are unchanged.
    silence, never wrongness — which it says in its own output. It also cannot see
    a failure at all, because a failed run rolls back and is never recorded, so
    nothing may call a source healthy or failing and a test asserts that.
-   **Still open, and the specific next step: record failed runs.** The failure row
-   would have to commit on a different connection from the transaction that rolled
-   back, which touches the "get_conn is the only owner of commit" invariant fixed
-   in §3A2, so it should be a deliberate change rather than a side effect.
+   **The follow-on closed too: failed runs are now recorded** (`AUDIT.md` §17),
+   outside the transaction that rolls back. `get_conn` gained one thing — a caller
+   may register a failure recorder, and if the session fails the rollback happens
+   first and the recorder's rows are committed afterwards. One connection, no second
+   commit path, and "get_conn owns every commit" is kept rather than bent. A failure
+   is recorded with a classified reason and the exception's class name and **never its
+   message**. Adopted by `fetch`; the ~30 `fetch-*` extractors are not, and
+   `FAILURE_RECORDING_COMMANDS` is published, quoted by the generated summary and
+   machine-checked against the command table. **A first design that opened a second
+   connection could not work** — a fetch that stored anything holds the write lock —
+   and the test that proved it is why §17 records three designs.
 4. **Finish the type annotations.** The gate prevents the debt growing in the
    foundation; it does not repay it in the historical modules. 542 functions
    still carry no annotation and their bodies are the only thing checked.

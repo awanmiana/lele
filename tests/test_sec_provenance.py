@@ -8,6 +8,7 @@ from contextlib import closing, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from lele.core import db
 from lele.analysis import engine
 from lele.cli.main import main
 from lele.core import importer, registry
@@ -87,7 +88,7 @@ def selected(payload=None):
 
 class SECProvenanceTests(unittest.TestCase):
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(registry._SCHEMA)
         self.addCleanup(self.conn.close)
@@ -366,7 +367,7 @@ def finmap_fixture(second=False):
 
 class FinmapTests(unittest.TestCase):
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(registry._SCHEMA)
         self.addCleanup(self.conn.close)

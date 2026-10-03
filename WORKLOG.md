@@ -1,5 +1,96 @@
 # Lele Worklog
 
+## Current handoff — a failed fetch now leaves a row, after two designs that could not work (user-directed; resume here)
+
+**The §16 follow-on is closed. 1063 tests, gate green.** Recording a failed ingest
+run is the change §16 named as needing care, and it took three designs.
+
+**Design one could not work, and the test that proved it is the point.** The obvious
+shape — open a second connection to the same file and write the failure row there —
+is impossible: a fetch that has stored anything holds the database's write lock for
+the whole session, so a second connection's INSERT blocks for the 5-second busy
+timeout and fails. **The case that matters most, a fetch that wrote rows and then
+failed, is exactly the case that cannot record.** My first version of the test left
+0 run rows behind. It would also have needed a real exception to "get_conn owns every
+commit", which is not a price worth paying for a feature that does not work.
+
+**Design two, kept: a recorder the transaction owner calls after its own rollback.**
+`get_conn` gained one thing — a caller may set `conn.lele_failure_recorder`, and if
+the session fails it **rolls back first**, then calls the recorder and commits its
+rows. The rows the failed work wrote are gone; the row saying it failed is not part
+of that work, which is the whole reason it survives. One connection, no lock, no
+second commit path, and **"get_conn owns every commit" is kept rather than bent**:
+the recorder writes, `get_conn` commits. A recorder that raises is swallowed and the
+original exception propagates unchanged.
+
+**The second bug was a `finally`.** The recorder is cleared on success only. My
+first version cleared it in a `finally`, which removed the recorder *while the
+exception was still propagating* — so `get_conn` found nothing registered and
+recorded nothing. That is the shape of defect this project keeps finding: the
+mechanism was right and the cleanup defeated it.
+
+**What is recorded.** `status='failed'`, zero counts, the request identity and query
+scope attempted, a reason from a closed vocabulary (`source_request`, `database`,
+`file`, `data`, `cancelled`, `unexpected`) and the exception's **class name**. Never
+its message — an exception message can carry a token, a password or a response body,
+and §3G1's rule applies to a database row exactly as it applies to the console. A
+test plants a secret in six exception types and asserts it reaches no column.
+
+**Only `fetch` adopts it.** The ~30 `fetch-*` extractors still roll their failure
+back, so a failure in one leaves no row. That is published rather than assumed:
+`provider_health.FAILURE_RECORDING_COMMANDS` carries it into the report
+(`failure_recording_commands`, `failure_recording_note`), `lele summary` quotes it,
+and a test asserts every name is a real command starting with `fetch`. Adopting one
+is a two-line change per fetcher and the list is the checklist. **This is the obvious
+next task**, and it is deliberately repetitive: one command at a time, each with its
+extractor's own parameters.
+
+**A plain `sqlite3.Connection` cannot carry the recorder at all** — no instance
+dictionary. The fetch reports `result["failure_recording"]` **only in that case**, so
+a normal result keeps exactly the shape it had and the key's presence is the signal.
+That surfaced a convention: eleven test files opened a bare in-memory connection, and
+two of them pin the exact key set of a fetch result. All eleven were moved to
+`db.Connection`, which is what every real caller gets.
+
+**Measured.** `lele fetch fdic` with the HTTP client raising
+`SourceError("token=SECRET-do-not-store")` against a temporary registry: exit 1, no
+secret on stdout or stderr, **no entity stored**, one `ingest_runs` row with
+`status='failed'` and `coverage='source_request: SourceError'`. `lele providers` then
+reports `failed_runs: 1` and the `recorded_failure` flag. At the same time §16's
+`NOT_A_CHECK` narrowed from "no failure is ever recorded" to "`fetch` failures are,
+`fetch-*` extractors' are not".
+
+**Tests.** `tests/test_failed_runs.py`, 16 offline tests, with the two halves pinned
+together because either alone would pass a weaker test: a failed fetch stores nothing
+**and** the row survives; the recorder runs after the rollback (asserted from inside
+it, where it sees zero entities); a recorder that raises does not replace the failure;
+no recorder means no row; a second failure appends rather than replaces; a secret
+reaches no column in six exception types; an in-memory registry records it too; the
+CLI path leaves no stored row and no leaked secret; an argument refused before any
+request records **no** run.
+
+**Verified.** `.tools/check.sh` unpiped, redirected to a file: 1063 tests, import,
+compileall, ruff on package and tests, mypy over 62 files, the connection guarantee
+under `ResourceWarning` as an error. Recorded in `AUDIT.md` §17.
+
+**Precise next task.** Adopt failure recording in the `fetch-*` extractors, starting
+with the ones a reader is most likely to trust — `fetch-form4`, `fetch-13f`,
+`fetch-nport`, `fetch-awards`, `fetch-lobbying`, `fetch-treasury`, `fetch-eia`,
+`fetch-opensky`, `fetch-cot`, `fetch-short` — and the sanctions fetches last,
+because those commit on their own transaction. Then the type annotations (measured
+2026-10-03: **612 of 743** functions in `lele/` still lack a complete signature),
+keyless non-Binance ingestion, the persistent watchlist and the HAR-log half.
+
+**Do not** lower the 0.9 constant, invent a contact email or API key, defeat the
+Stooq or Yahoo access controls, emit a buy/sell/hold signal, or ship an in-sample
+performance figure without an out-of-sample protocol and a cost model. The evidence
+against each is in `AUDIT.md` §11.
+
+**Do not** commit `session-ses_f08b.md`: it is a tooling transcript, untracked and
+not gitignored, and it is not part of this project.
+
+---
+
 ## Current handoff — provider health, and a queue item whose premise was half false (user-directed; resume here)
 
 **Queue item 3 is closed. 1045 tests, gate green.** The item asked for provider

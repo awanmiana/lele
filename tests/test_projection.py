@@ -10,12 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from lele.analysis import engine, projection
-from lele.core import registry
+from lele.core import db, registry
 
 
 class ProjectionTests(unittest.TestCase):
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(registry._SCHEMA)
         self.addCleanup(self.conn.close)

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, UTC
 
+from lele.core import db
 from lele.analysis import causes
 
 KEY = "binance:BTCUSDT"
@@ -117,7 +118,7 @@ class StoredContextProfileTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry_init(self.conn)
         self.addCleanup(self.conn.close)
@@ -241,7 +242,7 @@ class MagnitudeAndTrendTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry_init(self.conn)
         self.addCleanup(self.conn.close)
@@ -354,7 +355,7 @@ class TierLadderTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry_init(self.conn)
         self.addCleanup(self.conn.close)
@@ -455,7 +456,7 @@ class StoredWindowVerificationTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry_init(self.conn)
         self.addCleanup(self.conn.close)

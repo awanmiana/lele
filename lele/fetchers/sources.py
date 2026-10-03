@@ -17,8 +17,9 @@ from ..core.importer import (
     SEC_DURATION_TAGS, SEC_METRIC_TAGS, SEC_SELECTION, serialize_metric_envelope, validate_metric_envelope,
 )
 from ..core.registry import (add_edge, add_filing, add_metric, clear_edge_failure,
-                             latest_resumable_run, normalize_name, record_edge_failure,
-                             record_ingest_run, retract_edge, set_attr, upsert_entity)
+                             failed_run, latest_resumable_run, normalize_name,
+                             record_edge_failure, record_ingest_run, retract_edge,
+                             set_attr, set_failure_recorder, upsert_entity)
 from .http import HTTPClient, SourceError
 
 
@@ -861,6 +862,58 @@ def fetch_source(conn, source: str, query: str = '', country: str = '', limit: i
             raise SourceError("no resumable checkpoint found for these parameters.")
         start_offset = checkpoint["next_offset"]
         start_page = checkpoint["next_page"]
+    started = _now()
+    request_sha256 = hashlib.sha256(json.dumps(
+        {"source": source, "query": query, "country": country, "indicator": indicator,
+         "category": category, "limit": limit}, sort_keys=True).encode("utf-8")).hexdigest()
+    return _fetch_and_record(
+        conn, result, source=source, query=query, country=country, indicator=indicator,
+        category=category, limit=limit, financials=financials, start_offset=start_offset,
+        start_page=start_page, started=started, request_sha256=request_sha256)
+
+
+def _fetch_and_record(conn, result, *, source, query, country, indicator, category, limit,
+                      financials, start_offset, start_page, started, request_sha256):
+    """The fetching half of `fetch_source`, with its failure recorded.
+
+    `fetch_source` validates and then calls this, so a run row exists for every
+    fetch that reached the request stage and none for an argument that was refused
+    before any request was made.
+
+    The failure is recorded on a **different connection** from the one whose
+    transaction is about to roll back, because rolling back is the point: the rows
+    this fetch wrote must not survive it, and neither must the row saying it
+    failed. See `registry.record_failed_run` for why that is a deliberate exception
+    to the rule that `get_conn` owns every commit.
+    """
+    # Registered before the request, cleared after the run row is written, so a
+    # failure anywhere in the fetch is recorded and nothing else in this session is.
+    registered = set_failure_recorder(
+        conn, failed_run(source=source, query=query, country=country, indicator=indicator,
+                         category=category, started_at=started,
+                         request_sha256=request_sha256))
+    if not registered:
+        # Present only when it is something: the key's absence means a failure in this
+        # fetch would have been recorded, so a normal result keeps the shape it had.
+        result["failure_recording"] = ("unavailable: this connection cannot carry a recorder, so "
+                                       "a failure in this fetch leaves no row")
+    result = _fetch_body(
+        conn, result, source=source, query=query, country=country, indicator=indicator,
+        category=category, limit=limit, financials=financials, start_offset=start_offset,
+        start_page=start_page, started=started, request_sha256=request_sha256)
+    # Cleared on success only, and deliberately not in a `finally`: a fetch that fails
+    # must leave the recorder registered for `get_conn` to use as the exception leaves,
+    # and clearing it there is what stopped the first version of this from recording
+    # anything at all. A run row was written above, so the fetch did not fail, and a
+    # later failure in the same session belongs to whatever runs next.
+    if registered:
+        conn.lele_failure_recorder = None
+    return result
+
+
+def _fetch_body(conn, result, *, source, query, country, indicator, category, limit,
+                financials, start_offset, start_page, started, request_sha256):
+    """One fetch, from the first request to the run row that records it."""
     started = _now()
     request_sha256 = hashlib.sha256(json.dumps(
         {"source": source, "query": query, "country": country, "indicator": indicator,

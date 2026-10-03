@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from lele.analysis import events
 from lele.cli.main import main
-from lele.core import registry
+from lele.core import db, registry
 
 
 class EventTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class EventTests(unittest.TestCase):
         self.root = Path(directory.name)
         self.path = self.root / "prices.json"
         self.evidence = self.root / "evidence.json"
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(registry._SCHEMA)
         self.addCleanup(self.conn.close)

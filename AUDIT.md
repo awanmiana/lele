@@ -1292,3 +1292,127 @@ than echoing an exception.
   stopped asking.
 - `always_truncated` is a coverage statement, not a defect, and it is a claim about
   the *stored prefix*, never about what the provider holds.
+
+## 17. Recording a failed ingest run, and the two designs that could not work
+
+§16 closed provider health with its biggest blind spot named: a failed run rolls
+back with its transaction and is never recorded, so a source that errors leaves no
+trace and nothing can call one failing. This is the deliberate change the handoff
+flagged, and it took three designs because the first two could not work.
+
+### 17.1 Design one: a second connection, written outside the failed transaction
+
+The obvious shape — open a second connection to the same file and write the failure
+row there — is **impossible**, and the test that proved it is the reason this section
+exists. A fetch that has stored anything holds the database's write lock for the
+whole session, so a second connection's `INSERT` cannot proceed; it blocks until the
+5-second busy timeout and fails. The case that matters most — a fetch that wrote
+rows and then failed — is exactly the case that cannot record. Verified: the failing
+test left **0** run rows behind. It would also have needed a genuine exception to
+"get_conn owns every commit", which is not a price worth paying for a feature that
+does not work.
+
+### 17.2 Design two, kept: a recorder the transaction owner calls after its own rollback
+
+`get_conn` gains one thing. A caller may set `conn.lele_failure_recorder`; if the
+session fails, `get_conn` **rolls back first**, then calls the recorder and commits
+its rows. The rows the failed work wrote are gone, and the row saying it failed is
+not part of that work — which is the entire reason it survives. One connection, no
+lock, no second commit path, and **the rule that one place owns every commit is kept
+rather than bent**: the recorder writes, `get_conn` commits.
+
+Three properties this buys, each tested:
+
+- **A failure to record a failure never becomes the failure a caller sees.** A recorder
+  that raises is swallowed and the original exception propagates unchanged.
+- **An in-memory registry records it too.** The first design needed a second
+  connection and so could not; this one needs none, and an in-memory registry is
+  exactly what a test or a throwaway run uses.
+- **One failure records one row.** `get_conn` clears the recorder before calling it.
+
+The registration site is `fetch_source`, which validates and then calls
+`_fetch_and_record`, so a run row exists for every fetch that reached the request
+stage and none for an argument refused before any request. The recorder is cleared
+**on success only**, and that detail was the second bug this round: the first version
+cleared it in a `finally`, which removed the recorder while the exception was still
+propagating, so `get_conn` found nothing registered and recorded nothing.
+
+### 17.3 What a failure is recorded as
+
+`status='failed'`, zero counts, the request identity and the query scope it was
+attempting, and a reason drawn from a closed vocabulary — `source_request`,
+`database`, `file`, `data`, `cancelled`, `unexpected` — plus the exception's **class
+name**.
+
+**Never its message.** An exception message can carry a token, a password or a
+response body, and §3G1's rule applies to a database row exactly as it applies to
+the console. `classify_failure` returns the reason and the class name and nothing
+else; a test plants a secret in six different exception types and asserts it reaches
+neither the coverage text, the warnings, nor any other column.
+
+### 17.4 What is not adopted, stated in the report and machine-checked
+
+`FAILURE_RECORDING_COMMANDS = ("fetch",)`. Only `fetch` registers a recorder. The
+roughly thirty `fetch-*` extractors — Form 4, 13F, N-PORT, USAspending, LDA,
+Treasury, EIA, OpenSky, sanctions — still roll their failure back with their
+transaction, so a failure in one of those leaves no row and `lele providers` is blind
+to it.
+
+That list is published rather than assumed: `provider_health` carries it in the
+report (`failure_recording_commands`, `failure_recording_note`), the generated
+capability summary quotes it, and a test asserts every name is a real command that
+starts with `fetch`. Adopting one is a two-line change per fetcher, and the list is
+the checklist.
+
+A plain `sqlite3.Connection` cannot carry the recorder at all — `sqlite3.Connection`
+has no instance dictionary. Rather than fail, the fetch reports
+`result["failure_recording"]` **only in that case**, so a normal result keeps exactly
+the shape it had and the key's presence is itself the signal. Eleven test files that
+opened a bare in-memory connection were moved to `db.Connection`, which is what every
+real caller gets; two of them pinned the exact key set of a fetch result and would
+otherwise have failed on the new key.
+
+### 17.5 Measured
+
+`lele fetch fdic` against a temporary registry with `HTTPClient.get_json` raising
+`SourceError("token=SECRET-do-not-store")`: exit 1, no secret on stdout or stderr, **no
+entity stored**, and exactly one `ingest_runs` row with `status='failed'`,
+`coverage='source_request: SourceError'`. `lele providers` on the same registry
+reports `failed_runs: 1` and the `recorded_failure` flag.
+
+At the same time the blind spot narrowed from total to partial: §16's
+`NOT_A_CHECK` said no failure is ever recorded, and it now says a `fetch` failure is
+recorded while a `fetch-*` extractor's is not.
+
+### 17.6 Tests
+
+`tests/test_failed_runs.py`, 16 offline tests, and the two halves pinned together
+because either alone would pass a weaker test:
+
+- a failed fetch stores nothing **and** the failure row survives the rollback;
+- the recorder runs *after* the rollback — asserted from inside the recorder, which
+  sees zero entities;
+- a recorder that raises does not replace the original failure;
+- no recorder registered means no row;
+- a second failure appends a second row rather than replacing the first;
+- a successful run records `completed` and no extra row;
+- the request identity and scope are carried, so a failure is attributable;
+- a secret planted in six exception types reaches no column;
+- every value in `FAILURE_REASONS` is a phrase a reader can look up;
+- an in-memory registry records the failure too;
+- `lele fetch` end to end through `main`, asserting exit code, no leaked secret, no
+  stored row and one failed run;
+- an argument refused before any request records **no** run;
+- a provider report counts the failure and names its reason;
+- the report still says nothing about whether a command that records nothing worked.
+
+### 17.7 What this does not establish
+
+- It does not make a provider health check into a health check. A recorded failure is
+  a fact about one attempt; it is not a verdict, and the flag says so.
+- It covers one command. The `fetch-*` extractors remain unrecorded, and the report
+  says so rather than implying coverage.
+- The reason vocabulary classifies the failure, not the provider. `unexpected` means
+  this program has a defect, and it is recorded as such rather than hidden.
+- Nothing here compares a failure against a threshold. How many failures matter is
+  the operator's call, and this reports the count.

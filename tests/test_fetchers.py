@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 
-from lele.core import constants
+from lele.core import constants, db
 from lele.core.constants import (EVIDENCE_ENDPOINTS, REDIRECT_ENDPOINTS, SANCTIONS_ENDPOINTS,
                                      SOURCES)
 from lele.core.registry import _SCHEMA, entity_payload, list_ingest_runs, upsert_entity
@@ -81,7 +81,10 @@ def fdic_row(cert):
 
 class FetcherTests(unittest.TestCase):
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        # The project's own connection type, which is what every real caller gets:
+        # it carries the session facts a fetch registers a failure recorder on. A plain
+        # sqlite3.Connection cannot, and a fetch on one says so in its result instead.
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
         self.addCleanup(self.conn.close)

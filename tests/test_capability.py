@@ -339,7 +339,7 @@ def _registry():
     handle in a cron run is unbounded growth, which is what `test_db_guarantees`
     exists to prevent.
     """
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", factory=db.Connection)
     conn.row_factory = sqlite3.Row
     registry._initialize(conn)
     try:
@@ -351,7 +351,7 @@ def _registry():
 @contextlib.contextmanager
 def _broken():
     """A registry holding one table out of every one the schema promises."""
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", factory=db.Connection)
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE entities(id INTEGER)")
     try:

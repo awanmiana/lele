@@ -10,7 +10,7 @@ import unittest
 from datetime import datetime, timedelta, UTC
 
 from lele.analysis import events, signals
-from lele.core import registry
+from lele.core import db, registry
 from lele.fetchers import crypto_context as ctx
 from lele.fetchers import news_rss
 
@@ -49,7 +49,7 @@ class FeedParseTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry._initialize(self.conn)
         self.addCleanup(self.conn.close)
@@ -125,7 +125,7 @@ class MarketActivityTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", factory=db.Connection)
         self.conn.row_factory = sqlite3.Row
         registry._initialize(self.conn)
         self.addCleanup(self.conn.close)
