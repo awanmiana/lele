@@ -112,11 +112,24 @@ the four that write a document to a file and read the registry read-only —
 
 Also in §19: the three crypto-context sources store the `response_sha256` they already
 computed and never persisted, so for those three a content change is detectable from
-the run table where the other 22 recording sites hold only a count hash. That
-inconsistency is recorded rather than smoothed over, and unifying it is a migration
-and a separate decision. One defect fell out of the same function — `store-evidence`
-echoed an exception's message to the console, the one route around the rule that a
-classified message replaces the raw one.
+the run table where the other 22 recording sites hold only a summary of what they
+fetched. One defect fell out of the same function — `store-evidence` echoed an
+exception's message to the console, the one route around the rule that a classified
+message replaces the raw one.
+
+**The `records_sha256` migration is done 2026-10-03** (`AUDIT.md` §20), and measuring
+it first changed what it had to be: over the 25 recording sites the column held **five**
+different meanings and was absent at 17 of them. It is renamed `retrieval_sha256` with
+its values carried across unchanged and a migration note recorded, and a new
+`payload_sha256` holds the provider response where a fetcher has one. The monitor's flag
+became `no_payload_fingerprint` and now reports both figures per series.
+
+**22 of the 25 fetchers still store no content hash.** The rename made that gap
+legible; it did not close it, and closing it means each fetcher hashing its own
+response — twenty-two separate changes and a per-fetcher judgement about what is worth
+hashing. The rename would also have invented a finding on a read-only open of an older
+registry, reporting stored fingerprints as absent; the readers now ask the table which
+columns it has and the report names them in `fingerprint_columns`.
 
 **The next queue, in order.** Items 1, 1a, the capability summary, 2 and 3 are
 closed above, as is failed-run recording across the fetcher family; the rest are

@@ -219,7 +219,7 @@ def fetch_sentiment(conn, limit=365, end=None):
         fetched=len(rows), stored=stored, skipped=sum(skipped.values()), pages=1,
         total=len(observations), truncated=False,
         request_sha256=hashlib.sha256(url.encode("utf-8")).hexdigest(),
-        records_sha256=report["response_sha256"],
+        payload_sha256=report["response_sha256"],
         warnings=report["warnings"],
         coverage="daily crypto fear and greed index, market-wide, provider aggregate")
     return {"observations": observations}, report
@@ -385,7 +385,7 @@ def fetch_stablecoin_supply(conn, limit=1200, end=None):
         fetched=len(rows), stored=stored, skipped=sum(skipped.values()), pages=1,
         total=len(observations), truncated=False,
         request_sha256=hashlib.sha256(url.encode("utf-8")).hexdigest(),
-        records_sha256=report["response_sha256"],
+        payload_sha256=report["response_sha256"],
         warnings=report["warnings"],
         coverage="daily aggregate stablecoin supply, market-wide, provider aggregate")
     return {"observations": observations}, report
@@ -543,7 +543,7 @@ def fetch_market_activity(conn, entity_id, instrument_key, coin="bitcoin", days=
         fetched=len(moments), stored=stored, skipped=sum(skipped.values()), pages=1,
         total=len(observations), truncated=False,
         request_sha256=hashlib.sha256(url.encode("utf-8")).hexdigest(),
-        records_sha256=report["response_sha256"],
+        payload_sha256=report["response_sha256"],
         warnings=report["warnings"],
         coverage=f"daily {coin} market activity for {instrument_key}; a market-cap proxy, "
                  "not a net flow")

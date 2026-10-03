@@ -86,7 +86,7 @@ FLAGS = (
     "returned_nothing",
     "never_stored",
     "always_truncated",
-    "no_record_hash",
+    "no_payload_fingerprint",
     "stale",
 )
 
@@ -121,9 +121,10 @@ NOT_A_CHECK = (
     "named in EXPORT_ONLY_COMMANDS and are absent here for that reason rather than by omission. "
     "Absence of a new run is still not evidence that a source works, and nothing in this report "
     "can call a source failing or healthy.",
-    "No run records a hash of the records themselves: 17 of 25 recording sites pass no "
-    "records_sha256 and the rest hash counts and page metadata. A provider returning the "
-    "same number of different records is invisible here.",
+    "No run records a hash of the stored records: 17 of 25 recording sites store no "
+    "fingerprint at all, and of the eight that do only three hash the provider response "
+    "while the rest summarise what they fetched or stored. A provider returning the same "
+    "number of different records is invisible here for every series except those three.",
     "`request_sha256` is not uniformly a request hash -- sanctions stores the downloaded "
     "file's SHA-256 in it -- so `request_changed` means the recorded request identity "
     "changed, which may be a changed query or a changed payload.",
@@ -187,7 +188,8 @@ def _group(runs: list[dict]) -> dict:
     return grouped
 
 
-def _series(key: tuple, runs: list[dict], *, stale_after: Decimal, now) -> dict:
+def _series(key: tuple, runs: list[dict], *, stale_after: Decimal, now,
+            columns: dict | None = None) -> dict:
     """One source-query series, oldest run first, with its flags."""
     source, query, country, indicator, category = key
     ordered = sorted(runs, key=lambda row: row.get("started_at") or "")
@@ -249,12 +251,20 @@ def _series(key: tuple, runs: list[dict], *, stale_after: Decimal, now) -> dict:
              f"all {truncated} runs were truncated, so stored coverage is a prefix of what the "
              "provider offered and completeness is unknown",
              truncated_runs=truncated)
-    with_hash = sum(1 for row in ordered if row.get("records_sha256"))
-    if with_hash < len(ordered):
-        flag("no_record_hash",
-             f"{len(ordered) - with_hash} of {len(ordered)} runs carry no record hash, and the "
-             "ones that do hash counts rather than record contents, so a content change for "
-             "this series cannot be detected from this table")
+    columns = columns or {"retrieval": "retrieval_sha256", "payload": "payload_sha256"}
+    retrieval_column = columns.get("retrieval", "")
+    payload_column = columns.get("payload", "")
+    retrieval_hashed = sum(1 for row in ordered if retrieval_column
+                           and row.get(retrieval_column))
+    payload_hashed = sum(1 for row in ordered if payload_column and row.get(payload_column))
+    if payload_hashed < len(ordered):
+        flag("no_payload_fingerprint",
+             f"{len(ordered) - payload_hashed} of {len(ordered)} runs carry no hash of the "
+             "provider response, so a change in what the provider returned cannot be detected "
+             f"for this series. {retrieval_hashed} of {len(ordered)} runs do carry a retrieval "
+             "fingerprint, which is the fetcher's own summary of what it fetched or stored -- "
+             "counts, stored identity keys or page metadata -- and is not a hash of contents",
+             retrieval_hashed_runs=retrieval_hashed, payload_hashed_runs=payload_hashed)
     started = [_time(row.get("started_at", "")) for row in ordered]
     started = [moment for moment in started if moment is not None]
     last = started[-1] if started else None
@@ -295,7 +305,8 @@ def _series(key: tuple, runs: list[dict], *, stale_after: Decimal, now) -> dict:
         "age_hours": str(age) if age is not None else None,
         "request_identity_stable": stable,
         "recorded_request_identities": len(hashes),
-        "records_hashed_runs": with_hash,
+        "retrieval_hashed_runs": retrieval_hashed,
+        "payload_hashed_runs": payload_hashed,
         "fetched": _spread(fetched),
         "stored": _spread(stored),
         "skipped": _spread(skipped),
@@ -337,7 +348,8 @@ def report(conn, *, source: str = "", since_hours: int = 0,
         considered.append(row)
     grouped = _group(considered)
     stale_after = Decimal(stale_after_hours)
-    series = [_series(key, rows, stale_after=stale_after, now=moment)
+    columns = registry.ingest_run_fingerprint_columns(conn)
+    series = [_series(key, rows, stale_after=stale_after, now=moment, columns=columns)
               for key, rows in sorted(grouped.items())]
     if len(series) > limit:
         series = series[:limit]
@@ -369,6 +381,12 @@ def report(conn, *, source: str = "", since_hours: int = 0,
                    "run_read_bound_reached": at_bound,
                    "series": len(series), "series_bound": limit,
                    "series_bound_reached": truncated_series},
+        "fingerprint_columns": dict(columns),
+        "fingerprint_columns_note": "a read-only open never migrates, so a registry written "
+                                    "before the rename stores its retrieval fingerprint in "
+                                    "`records_sha256` and has no payload column; the report "
+                                    "names which columns were read so a stored fingerprint is "
+                                    "never reported as absent because of a rename",
         "sources": dict(sorted(sources.items())),
         "series": series,
         "flagged_series": len(flagged),

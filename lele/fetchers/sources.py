@@ -920,7 +920,7 @@ def _fetch_body(conn, result, *, source, query, country, indicator, category, li
             conn, source, started, _now(), query=query, fetched=result["fetched"],
             stored=result["stored"], pages=result["pages"], total=result["total"],
             truncated=result["truncated"], request_sha256=request_sha256,
-            records_sha256=hashlib.sha256(json.dumps(
+            retrieval_sha256=hashlib.sha256(json.dumps(
                 {"source": source, "fetched": result["fetched"], "stored": result["stored"],
                  "total": result["total"], "pages": result["pages"]},
                 sort_keys=True).encode("utf-8")).hexdigest(),
@@ -1021,7 +1021,7 @@ def _fetch_body(conn, result, *, source, query, country, indicator, category, li
             "Representative offices carry no automatic supervision claim; no regulator edge is inferred for them.",
             "stored counts imported institution records, excluding the regulator; absent records are not deleted and historical coverage is not claimed.",
         ])
-    records_sha256 = hashlib.sha256(json.dumps(
+    retrieval_sha256 = hashlib.sha256(json.dumps(
         [row.get("key") for row in mapped], sort_keys=True).encode("utf-8")).hexdigest()
     result = _store(conn, source, mapped, result, client)
     record_ingest_run(
@@ -1029,7 +1029,8 @@ def _fetch_body(conn, result, *, source, query, country, indicator, category, li
         category=category, fetched=result["fetched"], stored=result["stored"], skipped=skipped,
         missing=missing, pages=result["pages"], total=result["total"],
         truncated=result["truncated"], request_sha256=request_sha256,
-        records_sha256=records_sha256, warnings=result["warnings"], coverage=result["coverage"],
+        retrieval_sha256=retrieval_sha256, warnings=result["warnings"],
+        coverage=result["coverage"],
         resumable=resumable,
         next_offset=start_offset + result["fetched"] if resumable else 0,
         next_page=start_page + result["pages"] if resumable else 0,

@@ -335,6 +335,38 @@ def _migrate_move_events_range_column(conn: sqlite3.Connection) -> None:
                               f"terminal_bar_range_percent on {carried} stored move(s)")
 
 
+def _migrate_ingest_run_fingerprints(conn: sqlite3.Connection) -> None:
+    """Rename the run table's fingerprint column and add one for the response.
+
+    `records_sha256` claimed to be a hash of records, and measured over the 25
+    recording sites it was five different things: a count of what was fetched, the
+    identity keys of what was stored, page metadata, the imported row values, or --
+    for three sites -- the provider response. Seventeen sites passed nothing at all.
+    A name that is wrong for four fifths of its values teaches a reader to distrust
+    the column that would have been right, so it is renamed to say what it is
+    (`retrieval_sha256`) and the response hash gets its own column.
+
+    Values are carried across unchanged, for the reason §10 records: a rename that
+    recomputes looks identical to a rename that invents, and the note below is what
+    tells the two apart.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(ingest_runs)")}
+    if not columns:
+        return
+    if "records_sha256" in columns and "retrieval_sha256" not in columns:
+        conn.execute("ALTER TABLE ingest_runs RENAME COLUMN records_sha256 TO retrieval_sha256")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(ingest_runs)")}
+        _migration_note(
+            conn, "renamed ingest_runs.records_sha256 to retrieval_sha256 without recomputing "
+                  "it. The column held a fetcher's own fingerprint of what it retrieved and "
+                  "stored -- counts, stored identity keys, page metadata or imported row "
+                  "values depending on the fetcher -- and was not a hash of record contents. "
+                  "payload_sha256 is new and holds a hash of the provider response where a "
+                  "fetcher has one.")
+    if "payload_sha256" not in columns:
+        conn.execute("ALTER TABLE ingest_runs ADD COLUMN payload_sha256 TEXT NOT NULL DEFAULT ''")
+
+
 def _migration_note(conn: sqlite3.Connection, text: str) -> None:
     """Record what a migration did, so a silent rewrite cannot pass for a no-op."""
     row = conn.execute("SELECT v FROM meta WHERE k='migration_notes'").fetchone()
@@ -411,6 +443,7 @@ def initialize(conn: sqlite3.Connection) -> bool:
             conn.execute("DROP TABLE move_events")
         _migrate_move_causes(conn)
         _migrate_move_events_range_column(conn)
+        _migrate_ingest_run_fingerprints(conn)
         for statement in statements():
             conn.execute(statement)
         for values in preserved_events:

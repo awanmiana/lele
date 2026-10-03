@@ -1614,3 +1614,90 @@ failed one. That is a real end state rather than a shorter list of exceptions.
 - `EXPORT_ONLY_COMMANDS` being absent from the report is not a health claim. A command
   that writes a file and stores nothing cannot fail in a way that leaves a hole in the
   registry, which is a property of the code and not a judgement about the provider.
+
+## 20. One column, five meanings, and a rename that had to be readable both ways
+
+§19 left `records_sha256` meaning two different things depending on the fetcher, and
+said a migration was a separate decision. This is that decision, and measuring it
+first changed what it had to be.
+
+### 20.1 What the column actually held
+
+Twenty-five call sites write a run. Measured over every one with `ast`:
+
+| what was hashed into `records_sha256` | sites |
+| --- | --- |
+| nothing at all — the argument was not passed | **17** |
+| the provider response | 3 (the crypto-context sources added in §19) |
+| the identity keys of what was stored | 5 (`sources.py` non-SEC, four `sanctions.py`) |
+| a count of what was fetched and stored | 1 (`sources.py` SEC) |
+| page metadata | 1 (`history.py`) |
+| the imported rows' own OHLCV values | 1 (`import-history`) |
+
+Five meanings and seventeen absences under a name that claimed to be a hash of
+*records*. The column was right for exactly one site.
+
+### 20.2 The rename, and the column it made room for
+
+`records_sha256` → **`retrieval_sha256`**, values **carried across unchanged**, with
+the rename recorded in `meta.migration_notes`. That is §10's precedent exactly: a
+rename that recomputes is indistinguishable from a rename that invents, and the note
+is what tells a reader which happened. Verified on a v19-shaped database built by
+hand: `retrieval_sha256` returns the value written under the old name, and the note
+is present.
+
+`payload_sha256` is new and holds a hash of the provider response, used by the three
+sites that have one. Both meanings now have a name that fits them, and
+`provider_health` publishes `retrieval_hashed_runs` and `payload_hashed_runs` per
+series, so a reader can see which a given series has.
+
+**The flag changed with the columns.** `no_record_hash` said "no hash of the records"
+and fired on 10 of the 12 live series. It is now **`no_payload_fingerprint`**, whose
+detail names the missing thing and reports the one that exists — because "no
+fingerprint" and "no *content* fingerprint" are different gaps, and a reader told
+only the first cannot tell a series that summarises nothing from one that summarises
+its counts.
+
+The honest end state is unchanged and is now precisely stated: **twenty-two of the
+twenty-five fetchers still store no content hash.** The rename makes the gap legible
+rather than smaller. Recorded here because a rename that improved how the gap reads
+could be mistaken for closing it.
+
+### 20.3 The defect this rename would have introduced, found before it shipped
+
+A read-only open never migrates, so a registry written before the rename has
+`records_sha256` and **no** `retrieval_sha256`. Reading the new name unconditionally
+reports every stored fingerprint as absent — the rename inventing a finding instead of
+carrying a value across, which is the failure it was supposed to prevent.
+
+Measured on the research registry read-only, before the fix: all twelve series reported
+`retrieval=0/N`, including the two that demonstrably hold a fingerprint.
+`registry.ingest_run_fingerprint_columns` now asks the table which columns it has and
+returns the names, the reader uses them, and the report publishes
+`fingerprint_columns` with a note saying a read-only open never migrates. After the fix
+on the same registry: `gleif retrieval=1/1`, `eia retrieval=0/1`,
+`opensky retrieval=0/3` — which is exactly what the registry holds.
+
+### 20.4 Tests
+
+- a v19-shaped database is migrated and the value is read back **from the old column's
+  value**, with the rename recorded in `meta.migration_notes`;
+- a registry still carrying `records_sha256` reports its fingerprints, and the report
+  names the column it read — the §20.3 property;
+- a series with a response hash is **not** flagged blind to content change, and a
+  series with only a retrieval hash reports both figures;
+- no module outside `db.py`, `registry.py` and `provider_health.py` names the old
+  column in code, checked line by line with comments exempt, because the rename is
+  only honest while no name still claims otherwise.
+
+### 20.5 What this does not establish
+
+- Twenty-two of twenty-five fetchers still store no content hash. Renaming the column
+  made that visible; it did not close it. Closing it means each fetcher hashing its own
+  response, which is twenty-two separate changes and a per-fetcher judgement about what
+  is worth hashing.
+- `retrieval_sha256` still means different things per fetcher, and the name says only
+  that it is a summary of the retrieval rather than a content hash. A reader who needs
+  to know which kind must read the fetcher, and the migration note says so.
+- Nothing here verifies anything. A fingerprint detects that something changed; only
+  a comparison against ground truth could say the change was an improvement.

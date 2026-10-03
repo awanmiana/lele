@@ -195,7 +195,7 @@ def fetch_ofac(conn, source="ofac-sdn"):
             conn, source, started.isoformat(), clock.now().isoformat(),
             fetched=len(listings), stored=imported, skipped=skipped, pages=1,
             request_sha256=file_sha256,
-            records_sha256=hashlib.sha256(json.dumps(
+            retrieval_sha256=hashlib.sha256(json.dumps(
                 [item["key"] for item in listings], sort_keys=True).encode("utf-8")).hexdigest(),
             warnings=warnings, coverage=SANCTIONS_SOURCES[source])
         return {"source": source, "published_url": url, "retrieved_at": retrieved.isoformat(),
@@ -328,7 +328,7 @@ def fetch_un(conn, source="un-consolidated"):
             conn, source, started.isoformat(), clock.now().isoformat(),
             fetched=len(listings), stored=imported, skipped=skipped, pages=1,
             request_sha256=file_sha256,
-            records_sha256=hashlib.sha256(json.dumps(
+            retrieval_sha256=hashlib.sha256(json.dumps(
                 [item["key"] for item in listings], sort_keys=True).encode("utf-8")).hexdigest(),
             warnings=warnings, coverage=SANCTIONS_SOURCES[source])
         return {"source": source, "published_url": url, "retrieved_at": retrieved.isoformat(),
@@ -461,7 +461,7 @@ def fetch_uk(conn, source="uk-ofsi"):
             conn, source, started.isoformat(), clock.now().isoformat(),
             fetched=len(listings), stored=imported, skipped=skipped, pages=1,
             request_sha256=file_sha256,
-            records_sha256=hashlib.sha256(json.dumps(
+            retrieval_sha256=hashlib.sha256(json.dumps(
                 [item["key"] for item in listings], sort_keys=True).encode("utf-8")).hexdigest(),
             warnings=warnings, coverage=SANCTIONS_SOURCES[source])
         return {"source": source, "published_url": url, "retrieved_at": retrieved.isoformat(),
@@ -585,7 +585,7 @@ def fetch_eu(conn, source="eu-consolidated"):
             conn, source, started.isoformat(), clock.now().isoformat(),
             fetched=len(listings), stored=imported, skipped=skipped, pages=1,
             request_sha256=file_sha256,
-            records_sha256=hashlib.sha256(json.dumps(
+            retrieval_sha256=hashlib.sha256(json.dumps(
                 [item["key"] for item in listings], sort_keys=True).encode("utf-8")).hexdigest(),
             warnings=warnings, coverage=SANCTIONS_SOURCES[source])
         return {"source": source, "published_url": url, "retrieved_at": retrieved.isoformat(),

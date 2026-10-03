@@ -186,6 +186,13 @@ def _taxonomy():
         "provider_health": {
             "method": provider_health.METHOD,
             "flags": list(provider_health.FLAGS),
+            "fingerprints": {
+                "retrieval": "a fetcher's own summary of what it fetched or stored -- counts, "
+                             "stored identity keys or page metadata, depending on the fetcher. "
+                             "Not a hash of record contents",
+                "payload": "a hash of the provider response, stored by the fetchers that had one "
+                           "and discarded. Where it is present a content change is detectable",
+            },
             "collapse_threshold": str(provider_health.COLLAPSE_FRACTION),
             "default_stale_after_hours": provider_health.DEFAULT_STALE_HOURS,
             "run_read_bound": provider_health.MAX_RUNS,

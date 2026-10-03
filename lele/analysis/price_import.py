@@ -305,7 +305,7 @@ def import_price_history(conn, entity_id, path, interval="1d", now=None):
         conn, source="import-history", query=instrument["symbol"], indicator=interval,
         started_at=started.isoformat(), finished_at=(now or _now()).isoformat(),
         fetched=len(bars), stored=len(unique), skipped=duplicates, pages=1,
-        total=len(retained), truncated=False, records_sha256=records_hash,
+        total=len(retained), truncated=False, retrieval_sha256=records_hash,
         warnings=(["duplicated open times collapsed"] if duplicates else []),
         coverage=f"{interval} bars from a user-supplied export, {instrument['adjustment']}",
         pages_detail=[{"page": 1, "source_url": payload["source_url"], "rows": len(bars),

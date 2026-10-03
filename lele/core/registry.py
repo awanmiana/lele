@@ -1987,6 +1987,22 @@ def _has_prune_runs(conn: sqlite3.Connection) -> bool:
                              ).fetchone())
 
 
+def ingest_run_fingerprint_columns(conn) -> dict:
+    """Which columns this registry's run history carries fingerprints in.
+
+    A read-only open never migrates, so a registry written before the rename has
+    `records_sha256` and no `retrieval_sha256`. Reading the new name unconditionally
+    would report every stored fingerprint as absent, which is the rename inventing a
+    finding rather than carrying a value across -- the failure §10 records for a
+    misnamed column and the one this rename had to avoid. The names are returned so a
+    reader can be told which one was read.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(ingest_runs)")}
+    return {"retrieval": ("retrieval_sha256" if "retrieval_sha256" in columns
+                          else "records_sha256" if "records_sha256" in columns else ""),
+            "payload": "payload_sha256" if "payload_sha256" in columns else ""}
+
+
 def list_prune_runs(conn, limit: int = 50) -> list[dict]:
     if type(limit) is not int or not 1 <= limit <= 1000:
         raise ValueError("limit must be an integer from 1 to 1000")
@@ -2142,18 +2158,21 @@ def _write_ingest_run(conn, source: str, started_at: str, finished_at: str, *, q
                       country: str = "", indicator: str = "", category: str = "",
                       fetched: int = 0, stored: int = 0, skipped: int = 0, missing: int = 0,
                       pages: int = 0, total: int | None = None, truncated: bool = False,
-                      request_sha256: str = "", records_sha256: str = "", warnings=None,
+                      request_sha256: str = "", retrieval_sha256: str = "",
+                      payload_sha256: str = "", warnings=None,
                       coverage: str = "", status: str = "completed", resumable: bool = False,
                       next_offset: int = 0, next_page: int = 0, pages_detail=None) -> int:
     cursor = conn.execute(
         "INSERT INTO ingest_runs(source, query, country, indicator, category, started_at,"
         " finished_at, status, fetched, stored, skipped, missing, pages, total, truncated,"
-        " request_sha256, records_sha256, warnings, coverage, resumable, next_offset, next_page,"
+        " request_sha256, retrieval_sha256, payload_sha256, warnings, coverage, resumable,"
+        " next_offset, next_page,"
         " pages_detail)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (source, query, country, indicator, category, started_at, finished_at, status, fetched,
          stored, skipped, missing, pages, total, 1 if truncated else 0, request_sha256,
-         records_sha256, json.dumps(list(warnings or []), ensure_ascii=True, sort_keys=True),
+         retrieval_sha256, payload_sha256,
+         json.dumps(list(warnings or []), ensure_ascii=True, sort_keys=True),
          coverage, 1 if resumable else 0, next_offset, next_page,
          json.dumps(list(pages_detail or []), ensure_ascii=True, sort_keys=True)),
     )

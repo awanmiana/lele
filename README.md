@@ -981,7 +981,16 @@ A failure is recorded as `status: failed` with the request identity and query sc
 
 **Every fetcher that records a success records a failure.** Form 4, 13F, N-PORT, USAspending, LDA, Treasury, EIA, BLS, OpenSky, sanctions, Comtrade, Census, Federal Register, Form ADV, price history and `import-history` all register the same recorder their success row sits beside, so a failure lands in the same series as that source's successes. The coverage claim is a test over the source rather than a list of adopting commands: every module that calls `record_ingest_run` must also call `record_failures` **and** `clear_failure_recorder`, checked with `ast`.
 
-**Every command that writes rows to the registry records a completed run and a failed one** — including `fetch-sentiment`, `fetch-stablecoins`, `fetch-market-activity` and `store-evidence`, which until now recorded nothing at all, so a *success* of theirs was invisible too. The three crypto-context sources also store the response hash they already computed and never persisted, so for those three a content change is detectable from the run table where it is not for the others.
+**Every command that writes rows to the registry records a completed run and a failed one** — including `fetch-sentiment`, `fetch-stablecoins`, `fetch-market-activity` and `store-evidence`, which until now recorded nothing at all, so a *success* of theirs was invisible too.
+
+**What the fingerprints in a run row mean, after schema v20.** The column once called `records_sha256` held five different things under a name that fitted one of them, and was absent at 17 of the 25 recording sites. It is now:
+
+| column | what it holds | who writes it |
+| --- | --- | --- |
+| `retrieval_sha256` | the fetcher's own summary of what it fetched or stored — counts, stored identity keys, page metadata or imported row values, depending on the fetcher. **Not** a hash of record contents | 8 sites, and it means something different in each |
+| `payload_sha256` | a hash of the provider response | the three crypto-context sources, which already computed it and discarded it |
+
+So **22 of the 25 fetchers still store no content hash**, and `lele providers` says so per series: the `no_payload_fingerprint` flag names what is missing and reports the retrieval figure that does exist. The rename also had to be readable both ways — a read-only open never migrates, so the report asks the table which columns it has, names them in `fingerprint_columns`, and reads whichever is there, because otherwise every stored fingerprint on an older registry would be reported as absent. `AUDIT.md` §20 has the measurement and the table.
 
 **Four commands are absent from the run history, and the reason is a property of the code rather than an omission:** `fetch-prices`, `fetch-evidence`, `fetch-cot` and `fetch-short` read the registry through `read_connect` and write a document to a file. There is no transaction to roll back and no row to record. They are named in `provider_health.EXPORT_ONLY_COMMANDS`, printed in the report and quoted by `lele summary`, and **machine-checked against the routing**: a test parses the dispatch branches in `_dispatch` and fails if one of them ever opens a write session.
 

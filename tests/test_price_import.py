@@ -156,10 +156,11 @@ class StoredTests(ImportCase):
 
     def test_ingest_run_is_recorded_for_later_health_checks(self):
         run_id = self.run_import()["provenance"]["ingest_run_id"]
-        row = self.conn.execute("SELECT source, query, indicator, stored, total, records_sha256"
-                                " FROM ingest_runs WHERE id=?", (run_id,)).fetchone()
+        row = self.conn.execute("SELECT source, query, indicator, stored, total,"
+                                " retrieval_sha256 FROM ingest_runs WHERE id=?",
+                                (run_id,)).fetchone()
         self.assertEqual(tuple(row)[:5], ("import-history", "EQUITY-A", "1d", 4, 4))
-        self.assertEqual(len(row["records_sha256"]), 64)
+        self.assertEqual(len(row["retrieval_sha256"]), 64)
 
     def test_no_network_path_exists_in_this_module(self):
         # The report claims network_access is false. That claim is only worth

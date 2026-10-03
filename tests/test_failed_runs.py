@@ -227,6 +227,57 @@ class Adoption(unittest.TestCase):
 class ClearingOnSuccess(FileRegistry):
     """The registry this test writes to, with somewhere to put an export file."""
 
+    def test_a_v19_registry_keeps_its_fingerprint_and_gains_the_response_column(self):
+        """A rename that recomputes looks identical to a rename that invents.
+
+        So the value is written on the old column, the migration runs, and the carried
+        value is read back -- with the rename recorded in `meta.migration_notes`, which
+        is what a reader has instead of the git history.
+        """
+        with registry.get_conn(self.path) as conn:
+            conn.execute("ALTER TABLE ingest_runs DROP COLUMN payload_sha256")
+            conn.execute("ALTER TABLE ingest_runs RENAME COLUMN retrieval_sha256"
+                         " TO records_sha256")
+            conn.execute("DELETE FROM ingest_runs")
+            conn.execute(
+                "INSERT INTO ingest_runs(source, query, started_at, finished_at, status,"
+                " records_sha256) VALUES('fdic','q','2026-09-20T00:00:00+00:00',"
+                "'2026-09-20T00:01:00+00:00','completed','c0ffee')")
+            conn.execute("UPDATE meta SET v='19' WHERE k='schema_version'")
+            conn.execute("DELETE FROM meta WHERE k='migration_notes'")
+        with registry.get_conn(self.path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(ingest_runs)")}
+            self.assertNotIn("records_sha256", columns)
+            self.assertIn("retrieval_sha256", columns)
+            self.assertIn("payload_sha256", columns)
+            row = registry.list_ingest_runs(conn, limit=1)[0]
+            self.assertEqual(row["retrieval_sha256"], "c0ffee",
+                             "the value must be carried across, not recomputed")
+            self.assertEqual(row["payload_sha256"], "")
+            notes = str([item[0] for item in
+                         conn.execute("SELECT v FROM meta WHERE k='migration_notes'")])
+            self.assertIn("retrieval_sha256", notes,
+                          "a silent rename must leave a note saying what it did")
+
+    def test_no_call_site_calls_the_response_column_a_record_hash(self):
+        """The rename is only honest while no name in the tree claims otherwise."""
+        root = Path(__file__).resolve().parent.parent / "lele"
+        # `db.py` performs the rename, `registry.py` reads whichever column a
+        # registry actually has, and `provider_health.py` documents what each one
+        # held; those three may name the old column in code. Every other module may
+        # only mention it in a comment explaining the history.
+        offenders = []
+        for path in sorted(root.rglob("*.py")):
+            if path.name in ("db.py", "registry.py", "provider_health.py"):
+                continue
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if "records_sha256" not in line:
+                    continue
+                code = line.split("#", 1)[0]
+                if "records_sha256" in code:
+                    offenders.append(f"{path.relative_to(root)}:{number}")
+        self.assertEqual(offenders, [], f"these still name the old column in code: {offenders}")
+
     def test_a_fetcher_that_records_a_success_leaves_no_failure_recorded(self):
         """The clear on success is the half that is easy to leave out.
 

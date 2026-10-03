@@ -9,7 +9,7 @@ drifting away from it.
 import re
 import sqlite3
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(
@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS ingest_runs(
   total INTEGER,
   truncated INTEGER NOT NULL DEFAULT 0,
   request_sha256 TEXT NOT NULL DEFAULT '',
-  records_sha256 TEXT NOT NULL DEFAULT '',
+  retrieval_sha256 TEXT NOT NULL DEFAULT '',
+  payload_sha256 TEXT NOT NULL DEFAULT '',
   warnings TEXT NOT NULL DEFAULT '[]',
   coverage TEXT NOT NULL DEFAULT '',
   resumable INTEGER NOT NULL DEFAULT 0,

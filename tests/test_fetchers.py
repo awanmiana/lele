@@ -728,7 +728,7 @@ class FetcherTests(unittest.TestCase):
         run = runs[0]
         self.assertEqual((run["source"], run["status"], run["stored"]), ("fdic", "completed", 1))
         self.assertEqual(len(run["request_sha256"]), 64)
-        self.assertEqual(len(run["records_sha256"]), 64)
+        self.assertEqual(len(run["retrieval_sha256"]), 64)
         self.assertFalse(run["truncated"])
         self.client.get_json.side_effect = SourceError("HTTP 500")
         with self.assertRaises(SourceError):

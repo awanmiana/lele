@@ -1052,7 +1052,7 @@ CREATE INDEX IF NOT EXISTS idx_money_attrib_flow ON money_flow_attribution(flow_
             run_id = registry.record_ingest_run(
                 conn, "gleif", "2026-09-18T00:00:00Z", "2026-09-18T00:00:05Z", query="acme",
                 country="US", fetched=10, stored=8, skipped=1, missing=1, pages=2, total=10,
-                truncated=False, request_sha256="a" * 64, records_sha256="b" * 64,
+                truncated=False, request_sha256="a" * 64, retrieval_sha256="b" * 64,
                 warnings=["partial"], coverage="coverage text")
             runs = registry.list_ingest_runs(conn, 10)
         self.assertEqual(run_id, runs[0]["id"])
@@ -1062,7 +1062,8 @@ CREATE INDEX IF NOT EXISTS idx_money_attrib_flow ON money_flow_attribution(flow_
                           run["stored"], run["skipped"], run["missing"], run["pages"],
                           run["total"], run["status"]), ("gleif", "acme", "US", 10, 8, 1, 1, 2, 10,
                                                          "completed"))
-        self.assertEqual((run["request_sha256"], run["records_sha256"]), ("a" * 64, "b" * 64))
+        self.assertEqual((run["request_sha256"], run["retrieval_sha256"]),
+                         ("a" * 64, "b" * 64))
         self.assertEqual(run["warnings"], ["partial"])
         self.assertFalse(run["truncated"])
         with registry.get_conn(self.db) as conn, self.assertRaises(ValueError):

@@ -195,7 +195,7 @@ def fetch_price_history(conn, entity_id, symbol, interval="1d", limit=1000, page
         skipped=sum(skipped.values()), pages=len(pages_detail), total=retained_count,
         truncated=bool(pages_detail) and len(pages_detail) == pages
         and pages_detail[-1]["rows"] == page_size,
-        records_sha256=payload_hash, warnings=warnings,
+        retrieval_sha256=payload_hash, warnings=warnings,
         coverage=f"{interval} bars from Binance spot klines, unadjusted",
         pages_detail=pages_detail)
     return {

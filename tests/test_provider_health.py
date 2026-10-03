@@ -33,7 +33,7 @@ def iso(moment):
 
 
 def run(conn, *, source="opensky", query="all states", fetched=100, stored=10, skipped=0,
-        missing=0, pages=1, truncated=False, request="req-1", records="rec-hash",
+        missing=0, pages=1, truncated=False, request="req-1", records="rec-hash", payload="",
         warnings=None, started=None, indicator="", country="", category=""):
     """One recorded completed run, as a fetcher writes it.
 
@@ -48,7 +48,7 @@ def run(conn, *, source="opensky", query="all states", fetched=100, stored=10, s
         query=query, country=country, indicator=indicator, category=category,
         fetched=fetched, stored=stored, skipped=skipped, missing=missing, pages=pages,
         truncated=truncated, request_sha256=request,
-        records_sha256=records, warnings=warnings or [])
+        retrieval_sha256=records, payload_sha256=payload, warnings=warnings or [])
     # Committed because these registries are files: an uncommitted write here holds
     # the database's write lock, and `record_failed_run` opens a second connection on
     # purpose. It would report "not recorded" and this test would be measuring the
@@ -79,6 +79,18 @@ class RegistryCase(unittest.TestCase):
         kwargs.setdefault("now", NOW)
         return provider_health.report(self.conn, **kwargs)
 
+    def faults(self, report=None, **kwargs):
+        """The flags a series carries, less the one almost every real series carries.
+
+        `no_payload_fingerprint` fires for 22 of the 25 recording sites, because
+        almost none of them stores a hash of the provider response. Folding it into
+        every assertion would only add noise, so the assertions below are about the
+        other flags and this is where that one is left out.
+        """
+        report = report if report is not None else self.report(**kwargs)
+        return {entry["flag"] for series in report["series"] for entry in series["flags"]
+                if entry["flag"] != "no_payload_fingerprint"}
+
 
 class WhatIsRecorded(RegistryCase):
 
@@ -107,7 +119,7 @@ class WhatIsRecorded(RegistryCase):
         self.assertEqual(series["fetched"], {"first": 100, "last": 95, "min": 90, "max": 100})
         self.assertEqual(series["stored"], {"first": 10, "last": 11, "min": 9, "max": 11})
         self.assertEqual(series["pages"], {"first": 1, "last": 1, "min": 1, "max": 1})
-        self.assertEqual(self.report(stale_after_hours=0)["flags"], {},
+        self.assertEqual(self.faults(stale_after_hours=0), set(),
                          "a source that wobbles by 10 percent is not flagged")
 
     def test_a_bound_that_hides_runs_is_reported(self):
@@ -222,7 +234,9 @@ class Flags(RegistryCase):
         run(self.conn, fetched=10, request="req-2", started=NOW - timedelta(hours=1))
         series = self.report(stale_after_hours=0)["series"][0]
         self.assertFalse(series["request_identity_stable"])
-        self.assertEqual([entry["flag"] for entry in series["flags"]], ["request_changed"])
+        self.assertEqual([entry["flag"] for entry in series["flags"] if
+                          entry["flag"] != "no_payload_fingerprint"], ["request_changed"],
+                         "a changed request identity stops the comparison and says so")
         self.assertEqual((series["fetched"]["first"], series["fetched"]["last"]), (500, 10),
                          "the run history is published oldest-first, so the comparison a reader "
                          "would make by hand is visible")
@@ -277,11 +291,53 @@ class Flags(RegistryCase):
         self.assertIn("completeness is unknown", entry["detail"])
         self.assertEqual(self.report(stale_after_hours=0)["completeness"], "unknown")
 
-    def test_a_series_with_no_record_hash_says_content_change_cannot_be_seen(self):
-        run(self.conn, records="")
-        entry = next(item for item in self.report(stale_after_hours=0)["series"][0]["flags"]
-                     if item["flag"] == "no_record_hash")
-        self.assertIn("hash counts rather than record contents", entry["detail"])
+    def test_a_series_with_no_payload_fingerprint_says_what_it_does_have(self):
+        """The flag names the missing fingerprint and reports the one that exists.
+
+        Both halves matter: a reader told only "no fingerprint" cannot tell a series
+        that summarises nothing from one that summarises its counts, and the second is
+        the difference between "a change may have gone unnoticed" and "nothing at all is
+        recorded about what was fetched".
+        """
+        # The default run stores a retrieval fingerprint and no response hash, which
+        # is the shape 22 of the 25 real recording sites have.
+        run(self.conn)
+        series = self.report(stale_after_hours=0)["series"][0]
+        entry = next(item for item in series["flags"]
+                     if item["flag"] == "no_payload_fingerprint")
+        self.assertIn("no hash of the provider response", entry["detail"])
+        self.assertIn("not a hash of contents", entry["detail"])
+        self.assertEqual(series["retrieval_hashed_runs"], 1)
+        self.assertEqual(series["payload_hashed_runs"], 0)
+        self.assertEqual(entry["retrieval_hashed_runs"], 1)
+
+    def test_a_registry_written_before_the_rename_still_reports_its_fingerprints(self):
+        """A read-only open never migrates, so the old column name is still there.
+
+        Reading the new name unconditionally would report every stored fingerprint as
+        absent -- the rename inventing a finding instead of carrying a value across,
+        which is the failure this very rename had to avoid.
+        """
+        run(self.conn)
+        self.conn.execute("ALTER TABLE ingest_runs DROP COLUMN payload_sha256")
+        self.conn.execute("ALTER TABLE ingest_runs RENAME COLUMN retrieval_sha256"
+                          " TO records_sha256")
+        report = self.report(stale_after_hours=0)
+        self.assertEqual(report["fingerprint_columns"],
+                         {"retrieval": "records_sha256", "payload": ""})
+        self.assertEqual(report["series"][0]["retrieval_hashed_runs"], 1,
+                         "a stored fingerprint must not be reported as absent because of a "
+                         "rename this read never applied")
+        self.assertIn("never migrates", report["fingerprint_columns_note"])
+
+    def test_a_series_that_stores_the_response_hash_says_content_change_is_visible(self):
+        run(self.conn, records="", payload="deadbeef")
+        series = self.report(stale_after_hours=0)["series"][0]
+        self.assertEqual(series["payload_hashed_runs"], 1)
+        self.assertNotIn("no_payload_fingerprint", {item["flag"] for item in series["flags"]},
+                         "a series whose runs hash the provider response is not blind to a "
+                         "content change, and saying otherwise would be the same kind of false "
+                         "claim this module exists to avoid")
 
     def test_staleness_is_an_age_and_says_which_of_two_things_it_cannot_tell(self):
         run(self.conn, started=NOW - timedelta(hours=100))
@@ -292,7 +348,7 @@ class Flags(RegistryCase):
 
     def test_staleness_can_be_switched_off_rather_than_reported_anyway(self):
         run(self.conn, started=NOW - timedelta(hours=100))
-        self.assertEqual(self.report(stale_after_hours=0)["flags"], {})
+        self.assertEqual(self.faults(stale_after_hours=0), set())
 
     def test_every_flag_name_is_reachable_from_some_input(self):
         """A flag nothing can raise is one a reader cannot rely on being told."""
@@ -305,7 +361,7 @@ class Flags(RegistryCase):
             "returned_nothing": [dict(fetched=500, stored=5), dict(fetched=0, stored=0)],
             "never_stored": [dict(fetched=0, stored=0)],
             "always_truncated": [dict(truncated=True), dict(truncated=True)],
-            "no_record_hash": [dict(records="")],
+            "no_payload_fingerprint": [dict()],
             "stale": [dict(started=NOW - timedelta(hours=100))],
             "recorded_failure": [dict(fetched=100, stored=10)],
         }
@@ -365,7 +421,7 @@ class WhatItRefusesToSay(RegistryCase):
         failed; neither is available. The words appear only in the sentence saying
         so, which this also pins.
         """
-        run(self.conn, fetched=100, stored=100, truncated=False)
+        run(self.conn, fetched=100, stored=100, truncated=False, payload="pay")
         report = self.report()
         self.assertEqual(report["status"], "no_flags")
         self.assertEqual(provider_health.summary(self.conn, now=NOW)["status"], "no_flags")
@@ -381,10 +437,11 @@ class WhatItRefusesToSay(RegistryCase):
         run(self.conn)
         report = self.report()
         joined = " ".join(report["what_this_is_not"]).lower()
+        self.assertIn("no run records a hash of the stored records", joined)
         self.assertIn("a failed run is recorded with a classified reason", joined)
         self.assertIn("export_only_commands", joined)
         self.assertIn("absence of a new run is still not evidence that a source works", joined)
-        self.assertIn("no run records a hash of the records themselves", joined)
+        self.assertIn("no run records a hash of the stored records", joined)
         self.assertEqual(report["what_this_is_not"], list(provider_health.NOT_A_CHECK))
 
     def test_the_request_hash_is_not_uniformly_a_request_hash(self):
@@ -425,11 +482,19 @@ class Sources(RegistryCase):
         run(self.conn, source="opensky", fetched=1, stored=0)
         run(self.conn, source="opensky", query="other", fetched=1, stored=1)
         run(self.conn, source="sec", query="0000320193", fetched=5, stored=5)
-        rollup = self.report(stale_after_hours=0)["sources"]
+        report = self.report(stale_after_hours=0)
+        rollup = report["sources"]
         self.assertEqual(rollup["opensky"]["series"], 2)
         self.assertEqual(rollup["opensky"]["runs"], 2)
-        self.assertEqual(rollup["opensky"]["flagged"], 1)
-        self.assertEqual(rollup["sec"]["flagged"], 0)
+        self.assertEqual(rollup["opensky"]["flagged"], 2,
+                         "both series carry the payload-fingerprint flag, which the rollup "
+                         "counts like any other")
+        self.assertEqual(rollup["sec"]["flagged"], 1)
+        faults = {entry["flag"] for series in report["series"] for entry in series["flags"]
+                  if entry["flag"] != "no_payload_fingerprint"}
+        self.assertEqual(faults, {"never_stored", "stored_zero_while_fetched"},
+                         "and the series that stored nothing is flagged for that and for having "
+                         "fetched rows it stored none of")
 
     def test_warnings_are_collected_across_the_series_history(self):
         run(self.conn, warnings=["first"], started=NOW - timedelta(hours=2))

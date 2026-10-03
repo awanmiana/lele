@@ -1,5 +1,87 @@
 # Lele Worklog
 
+## Current handoff — one column held five meanings, and the rename had to be readable both ways (user-directed; resume here)
+
+**The `records_sha256` migration is done. Schema v20. 1070 tests, gate green.**
+§19 said unifying the hash was "a migration and a separate decision". Measuring it
+first changed what it had to be.
+
+**The column held five different things and was absent at 17 of the 25 recording
+sites.** Measured with `ast` over every `record_ingest_run` call: nothing at all (17),
+the provider response (3), the identity keys of what was stored (5), a count of what
+was fetched (1), page metadata (1), the imported rows' own OHLCV values (1). The name
+claimed to be a hash of *records* and was right for exactly one site.
+
+**What I did.** Renamed it `retrieval_sha256` — values **carried across unchanged**,
+with the rename recorded in `meta.migration_notes`, which is §10's precedent: a rename
+that recomputes looks identical to a rename that invents, and the note is what tells
+a reader which happened. Added `payload_sha256` for the response hash. The eight call
+sites were updated, and the three crypto-context ones moved to the new column.
+
+**The flag changed with the columns, and the change is the useful part.**
+`no_record_hash` said "no hash of the records" and fired on 10 of the 12 live series.
+It is now `no_payload_fingerprint`, and its detail names what is missing *and reports
+the figure that does exist* — "no fingerprint" and "no content fingerprint" are
+different gaps, and a reader told only the first cannot tell a series that summarises
+nothing from one that summarises its counts. Per series the report now publishes
+`retrieval_hashed_runs` and `payload_hashed_runs`.
+
+**22 of the 25 fetchers still store no content hash.** The rename made the gap
+legible; it did not close it, and closing it means each fetcher hashing its own
+response — twenty-two separate changes, each a judgement about what is worth hashing.
+Recorded so a rename that improved how the gap reads is not mistaken for closing it.
+
+**The defect the rename would have introduced, caught by running it on real data.** A
+read-only open never migrates, so a registry written before the rename has
+`records_sha256` and **no** `retrieval_sha256` — and reading the new name
+unconditionally reports every stored fingerprint as **absent**. Measured on the
+research registry read-only, before the fix: all twelve series `retrieval=0/N`,
+including the two that demonstrably hold one. That is the rename inventing a finding
+instead of carrying a value across, which is the failure it was meant to prevent.
+`registry.ingest_run_fingerprint_columns` now asks the table what it has, the reader
+uses it, and the report publishes `fingerprint_columns` with a note. After the fix on
+the same registry: `gleif 1/1`, `eia 0/1`, `opensky 0/3` — which is what it holds.
+
+**Tests.** A v19-shaped database is migrated and the value read back **from the value
+written under the old column**, with the rename in the migration notes; a registry
+still carrying `records_sha256` reports its fingerprints and names the column it read;
+a series with a response hash is not flagged blind to content change while one with
+only a retrieval hash reports both figures; and no module outside `db.py`,
+`registry.py` and `provider_health.py` names the old column in code, checked line by
+line with comments exempt.
+
+**Three edits I got wrong on the way**, all caught immediately: a `replace` with a
+condition expression in it (`records_sha256="c0ffee" if False else ...`) was a syntax
+error in my own probe; the migration's `ADD COLUMN` guard had a nonsensical
+`columns | {"retrieval_sha256"}` set union that would have skipped the column on a
+partially-migrated table; and the first test-helper edit made every "no flags"
+assertion fail at once, because the new flag fires for 22 of 25 real series — which is
+correct behaviour and needed a `faults()` helper that folds out the one flag almost
+everything carries, rather than weakening every other assertion.
+
+**Verified.** `.tools/check.sh` unpiped, redirected to a file: 1070 tests, import,
+compileall, ruff on package and tests, mypy over 62 files, the connection guarantee
+under `ResourceWarning` as an error. Recorded in `AUDIT.md` §20.
+
+**Precise next task.** There is no bookkeeping gap left in run recording or in its
+fingerprints. What remains, in order: the type annotations (measured 2026-10-03:
+**612 of 743** functions in `lele/` still lack a complete signature — and this
+round's `ast` walks are a working precedent for doing it module by module), keyless
+non-Binance ingestion, the persistent watchlist, the HAR-log forecasting half. A
+smaller one worth deciding deliberately: whether each remaining fetcher should hash
+its own response, which is the only way `payload_sha256` stops being a three-site
+column.
+
+**Do not** lower the 0.9 constant, invent a contact email or API key, defeat the
+Stooq or Yahoo access controls, emit a buy/sell/hold signal, or ship an in-sample
+performance figure without an out-of-sample protocol and a cost model. The evidence
+against each is in `AUDIT.md` §11.
+
+**Do not** commit `session-ses_f08b.md`: it is a tooling transcript, untracked and
+not gitignored, and it is not part of this project.
+
+---
+
 ## Current handoff — every command that writes rows now records both outcomes, and the last list was two claims (user-directed; resume here)
 
 **The §18 gap is closed. 1066 tests, gate green.** Five commands wrote rows while
