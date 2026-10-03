@@ -243,11 +243,47 @@ class HTTPClient:
         self.warnings: list[str] = []
         self.retrieved_at = ""
         self.retrieved_epoch = 0.0
+        #: What each URL returned, as a hash of the canonical form of the parsed
+        #: document. Kept here because this is the one place every response passes
+        #: through, so a fetcher does not have to decide for itself what "the
+        #: payload" means -- section 20 found five different answers to that question
+        #: in the run history, three of them absent.
+        self.payloads: dict = {}
         self.opener = build_opener(_NoRedirect())
 
     def _warn(self, message: str) -> None:
         if message not in self.warnings:
             self.warnings.append(message)
+
+    def record_payload(self, url: str, payload: Any) -> None:
+        """Remember what `url` returned, hashed over its canonical form.
+
+        Canonical rather than raw, because a provider that reorders keys or changes
+        its whitespace has not changed what it said, and a fingerprint that moved on
+        every run would train a reader to ignore the one that matters. `allow_nan`
+        stays on: a fingerprint must not be the thing that raises on a provider
+        sending a NaN, and `repr(NaN)` is stable, so the hash still is.
+        """
+        try:
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=False, default=repr)
+        except (TypeError, ValueError, RecursionError):
+            self._warn("response could not be canonicalised; its fingerprint is weaker")
+            canonical = repr(payload)
+        self.payloads[url] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def payload_fingerprint(self) -> str:
+        """One hash over everything this session read, or `""` if it read nothing.
+
+        A paged fetcher reads many URLs and wants a single value in the run row, so
+        this is a hash of the sorted `url digest` pairs: two runs that asked the same
+        questions and got the same answers agree, and a run that read more, read
+        differently, or read a different page does not.
+        """
+        if not self.payloads:
+            return ""
+        joined = "".join(f"{url} {digest}\n" for url, digest in sorted(self.payloads.items()))
+        return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
     def _stamp(self, when: float) -> None:
         self.retrieved_epoch = when
@@ -349,11 +385,13 @@ class HTTPClient:
         host = validate_url(url)
         cached = self._read_cache(url)
         if cached is not None:
+            self.record_payload(url, cached)
             return cached
         payload = self._with_retries(lambda: self._request(url, host), host)
         fetched_at = time.time()
         self._stamp(fetched_at)
         self._write_cache(url, payload, fetched_at)
+        self.record_payload(url, payload)
         return payload
 
     def request_json(self, url: str, headers: dict | None = None, cache: bool = True) -> Any:
@@ -408,6 +446,7 @@ class HTTPClient:
 
         text = self._with_retries(read, host)
         self._stamp(time.time())
+        self.record_payload(url, text)
         return text
 
     def download(self, url: str, target_path: str | Path, max_bytes: int) -> int:
@@ -469,6 +508,14 @@ class HTTPClient:
 
         written = self._with_retries(read, host)
         self._stamp(time.time())
+        # The document is hashed from the bytes just written, which is what the caller
+        # will read back, so the fingerprint describes that file rather than a second read
+        # of the provider.
+        try:
+            with open(target, "rb") as stream:
+                self.record_payload(url, stream.read())
+        except OSError:
+            self._warn("downloaded document could not be re-read to fingerprint it")
         return written
 
     def _read_body(self, response: Any, host: str, limit: int, label: str) -> bytes:

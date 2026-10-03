@@ -771,6 +771,13 @@ def _sec_facts(payload, cik, source_url, retrieved_at):
 
 
 def _fetch_sec(conn, query, limit, financials, result):
+    """One SEC issuer, fingerprinted before its run row is written.
+
+    The fingerprint is set here rather than by the caller because the client that
+    read the document is local to this function: a run row that recorded no
+    fingerprint for a response the program plainly read would be the gap this
+    work exists to close.
+    """
     cik = _sec_cik(conn, query)
     client = HTTPClient()
     url = f"{SOURCES['SEC_SUBMISSIONS']}/CIK{cik}.json"
@@ -806,6 +813,7 @@ def _fetch_sec(conn, query, limit, financials, result):
             result["warnings"].extend(facts_client.warnings)
     except (SourceError, KeyError, TypeError, ValueError, OverflowError) as exc:
         raise SourceError(f"sec: fetch failed; no ingestion writes applied. {exc}") from exc
+    registry.set_payload_fingerprint(conn, client)
     return _store(conn, "sec", [record], result, client)
 
 
@@ -916,6 +924,7 @@ def _fetch_body(conn, result, *, source, query, country, indicator, category, li
          "category": category, "limit": limit}, sort_keys=True).encode("utf-8")).hexdigest()
     if source == "sec":
         result = _fetch_sec(conn, query, limit, financials, result)
+        registry.clear_failure_recorder(conn)
         record_ingest_run(
             conn, source, started, _now(), query=query, fetched=result["fetched"],
             stored=result["stored"], pages=result["pages"], total=result["total"],
@@ -1024,6 +1033,7 @@ def _fetch_body(conn, result, *, source, query, country, indicator, category, li
     retrieval_sha256 = hashlib.sha256(json.dumps(
         [row.get("key") for row in mapped], sort_keys=True).encode("utf-8")).hexdigest()
     result = _store(conn, source, mapped, result, client)
+    registry.set_payload_fingerprint(conn, client)
     record_ingest_run(
         conn, source, started, _now(), query=query, country=country, indicator=indicator,
         category=category, fetched=result["fetched"], stored=result["stored"], skipped=skipped,

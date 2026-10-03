@@ -214,6 +214,7 @@ def fetch_nport(conn, entity_id, limit=MAX_FILINGS_DEFAULT):
     finished = clock.now()
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"),
                            allow_nan=False).encode("utf-8")
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(), query=cik,

@@ -73,6 +73,8 @@ class Connection(sqlite3.Connection):
     lele_failure_recorder: object = None
     #: The exception the recorder is being called for, set for the same reason.
     lele_failure: object = None
+    #: What this session read, as a hash; see `registry.set_payload_fingerprint`.
+    lele_payload_sha256: str = ""
 
 
 class RegistryError(ValueError):

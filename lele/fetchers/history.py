@@ -187,6 +187,7 @@ def fetch_price_history(conn, entity_id, symbol, interval="1d", limit=1000, page
     payload_hash = hashlib.sha256(
         json.dumps(pages_detail, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     run_id = registry.record_ingest_run(
         conn, source=f"{SOURCE}-history", query=symbol, indicator=interval,

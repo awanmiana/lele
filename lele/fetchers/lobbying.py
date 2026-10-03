@@ -174,6 +174,7 @@ def fetch_lobbying(conn, entity_id, client_id=None, registrant_id=None, limit=MA
     warnings = list(client.warnings)
     if truncated:
         warnings.append("a quarterly page returned the full limit; additional filings may exist")
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(), query=str(party_id),

@@ -2180,7 +2180,47 @@ def _write_ingest_run(conn, source: str, started_at: str, finished_at: str, *, q
 
 
 def record_ingest_run(conn, source: str, started_at: str, finished_at: str, **fields) -> int:
+    """Write one run row.
+
+    A `payload_sha256` that is absent means "take the fingerprint this session
+    read", which the caller sets with `set_payload_fingerprint`; an explicit empty
+    string means "this run deliberately records none", so the two cannot be
+    confused. The distinction matters because §20 measured how many fetchers
+    stored no fingerprint at all.
+    """
+    if "payload_sha256" not in fields:
+        fields["payload_sha256"] = getattr(conn, "lele_payload_sha256", "") or ""
     return _write_ingest_run(conn, source, started_at, finished_at, **fields)
+
+
+def set_payload_fingerprint(conn, value) -> bool:
+    """Record what this session read, so the run row can carry it.
+
+    Set on the connection rather than passed per call, because every fetcher needs
+    it and only one of them had a payload hash to pass. Returns whether the
+    connection could carry it; a plain `sqlite3.Connection` cannot, and a run that
+    recorded none is then honest rather than wrong.
+
+    Accepts the client rather than a hash, so a caller cannot forget to ask it and
+    twenty-two fetchers do not each spell the question. Anything that is not a
+    string, and any client that does not implement the fingerprint, contributes
+    nothing and is refused rather than stored: a fingerprint column that can hold a
+    non-string is a column whose contents cannot be compared, and the way that
+    arrives is a client replaced by a test double. The guard is here rather than in
+    each caller for exactly that reason.
+    """
+    if not isinstance(value, str):
+        reader = getattr(value, "payload_fingerprint", None)
+        if not callable(reader):
+            return False
+        value = reader()
+    if not isinstance(value, str):
+        return False
+    try:
+        conn.lele_payload_sha256 = value
+    except AttributeError:
+        return False
+    return True
 
 
 #: How a failure is named in a run row. The exception's own message is never
@@ -2247,6 +2287,9 @@ def record_failed_run(conn, *, error: BaseException, source: str, started_at: st
     run_id = _write_ingest_run(
         conn, source, started_at, finished, query=query, country=country,
         indicator=indicator, category=category, request_sha256=request_sha256,
+        # What the session had read when it failed, which may be nothing and may be
+        # several responses: a failed fetch is not a fetch that read nothing.
+        payload_sha256=getattr(conn, "lele_payload_sha256", "") or "",
         status="failed", coverage=f"{reason}: {name}", warnings=[f"{reason}: {name}"])
     return {"recorded": True, "run_id": run_id, "reason": reason, "error_class": name}
 

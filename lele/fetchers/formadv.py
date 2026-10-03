@@ -140,6 +140,7 @@ def fetch_formadv(conn, query="", limit=MAX_LIMIT_DEFAULT, start=0):
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
     warnings = list(client.warnings)
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
@@ -267,6 +268,7 @@ def fetch_formadv_individual(conn, query="", limit=MAX_LIMIT_DEFAULT, start=0):
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
     warnings = list(client.warnings)
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),

@@ -208,6 +208,7 @@ def fetch_political(conn, limit=MAX_LIMIT_DEFAULT, start=None, end=None, categor
     truncated = len(results) >= limit
     if truncated:
         warnings.append("the page returned the full limit; older documents may be absent")
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),

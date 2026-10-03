@@ -1,5 +1,92 @@
 # Lele Worklog
 
+## Current handoff — a content fingerprint for every fetcher, from the one place every response passes through (user-directed; resume here)
+
+**The 22-of-25 gap is closed. 1079 tests, gate green.** §20 said closing it meant
+twenty-two separate changes, each a judgement about what is worth hashing. Measuring
+where the responses actually arrive showed that was the wrong shape.
+
+**The judgement was never the fetchers' to make.** `HTTPClient` parses the document,
+hands the object back and keeps nothing — so every fetcher had been left to decide what
+"the payload" means, and §20 measured what five of them had decided: counts, stored
+keys, page metadata, imported values, the response. One was right by luck. The client is
+the **one place every response passes through**, so the fingerprint belongs there:
+`record_payload(url, payload)` hashes the canonical form of the parsed document, and
+`payload_fingerprint()` folds every URL it read into one value. A fetcher now makes no
+judgement at all — one statement beside its run row.
+
+**Canonical, not raw**, because a provider that reorders keys or changes whitespace has
+not changed what it said, and a fingerprint that moved on every run would train a reader
+to ignore the one that matters. `allow_nan` stays on so the fingerprint is never the
+thing that raises — though the JSON reader already refuses a non-finite number in a
+response, so that guard is for a caller that decoded one itself.
+
+**Three sites differ by necessity and say so.** `import-history` records the imported
+rows' own values (there is no provider; the input document *is* the rows).
+`store-evidence` records none, because the client that read its document belongs to
+`evidence.fetch_evidence` and there is nothing in that function's scope to ask.
+`record_failed_run` takes the session's fingerprint, because a failed fetch is not a fetch
+that read nothing.
+
+**The guard belongs in the registry, and a test double proved it.** The first version
+passed `client.payload_fingerprint()` at each call site, and `tests/test_fetchers.py`
+— which replaces `HTTPClient` with a `Mock` — put a `Mock` in a `TEXT NOT NULL` column.
+The tempting fix is `hasattr` at each of twenty-two call sites, which is the wrong shape;
+so the registry takes the client and asks it, and **refuses anything that is not a
+string**. A fingerprint column that can hold a non-string is a column whose contents
+cannot be compared. That this changed **none** of the fifteen test doubles is the check
+on the decision: had it been the wrong place, the cost would have been fifteen edits.
+
+**Measured through the real code**, provider call stubbed, on `fetch-sentiment`: first
+success `b6386d827af71ee6…`, the same call again `b6386d827af71ee6…`, and a response
+differing by one reading `fccb575549ecaed4…`. `payload_hashed_runs: 3 of 3` on that
+registry, where before this work the series was flagged blind to a content change on
+every run.
+
+**Five edits I got wrong on the way**, all in the mechanics and none in the design, and
+all recorded because the pattern is the point: inserting a keyword argument *after* a
+multi-line call's opening line lands inside the call; before the closing line lands
+inside a nested bracket; the same expression used for two tables landed the second one's
+row in the first function; an indent built by `textwrap.indent` plus a prefix was
+applied twice; and `record_ingest_run`'s sentinel tested `fields.get(..., "") is None`,
+which is never true for an absent key, so the fallback never fired and `None` reached a
+`NOT NULL` column. **Scripted edits that touch every fetcher are the wrong tool**; the
+version that worked was one statement on a unique anchor, plus a registry helper that
+absorbs the awkward cases.
+
+**Tests.** The fingerprint is of the payload (asserted against the canonical form of what
+`get_json` returned); key order and whitespace do not move it and a changed value does; a
+paged run differs from a single-page one; a NaN does not break it; a session that read
+nothing fingerprints nothing; an explicit `payload_sha256=""` differs from not saying
+which; four kinds of unusable client record none rather than a junk value; and every
+fetcher that writes a run row sets the fingerprint, checked over the source with
+`main.py` named as the one exemption and the reason given.
+
+**Verified.** `.tools/check.sh` unpiped, redirected to a file: 1079 tests, import,
+compileall, ruff on package and tests, mypy over 62 files, the connection guarantee
+under `ResourceWarning` as an error. Recorded in `AUDIT.md` §21.
+
+**Precise next task.** No bookkeeping gap is left in run recording or its fingerprints.
+The queue is now: the type annotations (measured 2026-10-03: **612 of 743** functions in
+`lele/` still lack a complete signature), keyless non-Binance ingestion, the persistent
+watchlist, and the HAR-log forecasting half. The first two rounds of this handoff were
+bookkeeping because the bookkeeping was the substance; the next one should be a
+capability, and between the two remaining candidates the **persistent watchlist** is the
+smaller and the more clearly useful — the threshold rule exists and is tested, and
+nothing stores it or re-runs it. It must stay on-demand: no scheduler, no webhook and
+no SMTP without an explicit decision, because notification infrastructure that does not
+exist must not be implied by a report that mentions one.
+
+**Do not** lower the 0.9 constant, invent a contact email or API key, defeat the
+Stooq or Yahoo access controls, emit a buy/sell/hold signal, or ship an in-sample
+performance figure without an out-of-sample protocol and a cost model. The evidence
+against each is in `AUDIT.md` §11.
+
+**Do not** commit `session-ses_f08b.md`: it is a tooling transcript, untracked and
+not gitignored, and it is not part of this project.
+
+---
+
 ## Current handoff — one column held five meanings, and the rename had to be readable both ways (user-directed; resume here)
 
 **The `records_sha256` migration is done. Schema v20. 1070 tests, gate green.**

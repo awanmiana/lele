@@ -190,6 +190,7 @@ def fetch_ofac(conn, source="ofac-sdn"):
         if delisted:
             warnings.append(f"{delisted} previously active listings are absent from the current "
                             "file and were marked delisted, not deleted.")
+        registry.set_payload_fingerprint(conn, client)
         registry.clear_failure_recorder(conn)
         registry.record_ingest_run(
             conn, source, started.isoformat(), clock.now().isoformat(),
@@ -323,6 +324,7 @@ def fetch_un(conn, source="un-consolidated"):
         if delisted:
             warnings.append(f"{delisted} previously active listings are absent from the current "
                             "file and were marked delisted, not deleted.")
+        registry.set_payload_fingerprint(conn, client)
         registry.clear_failure_recorder(conn)
         registry.record_ingest_run(
             conn, source, started.isoformat(), clock.now().isoformat(),
@@ -456,6 +458,7 @@ def fetch_uk(conn, source="uk-ofsi"):
         if delisted:
             warnings.append(f"{delisted} previously active listings are absent from the current "
                             "file and were marked delisted, not deleted.")
+        registry.set_payload_fingerprint(conn, client)
         registry.clear_failure_recorder(conn)
         registry.record_ingest_run(
             conn, source, started.isoformat(), clock.now().isoformat(),
@@ -580,6 +583,7 @@ def fetch_eu(conn, source="eu-consolidated"):
         if delisted:
             warnings.append(f"{delisted} previously active listings are absent from the current "
                             "file and were marked delisted, not deleted.")
+        registry.set_payload_fingerprint(conn, client)
         registry.clear_failure_recorder(conn)
         registry.record_ingest_run(
             conn, source, started.isoformat(), clock.now().isoformat(),

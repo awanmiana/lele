@@ -1701,3 +1701,98 @@ on the same registry: `gleif retrieval=1/1`, `eia retrieval=0/1`,
   to know which kind must read the fetcher, and the migration note says so.
 - Nothing here verifies anything. A fingerprint detects that something changed; only
   a comparison against ground truth could say the change was an improvement.
+
+## 21. A content fingerprint for every fetcher, from the one place every response passes through
+
+§20 ended with 22 of the 25 recording fetchers storing no content hash and said
+closing that meant twenty-two separate changes, each a judgement about what is worth
+hashing. Measuring where the responses actually arrive showed the twenty-two changes
+were the wrong shape.
+
+### 21.1 The judgement was never the fetchers' to make
+
+`HTTPClient` parses the document, hands the object back, and keeps nothing. So every
+fetcher had been left to decide for itself what "the payload" means — and §20 measured
+what five of them had decided: counts, stored keys, page metadata, imported values, the
+response. One of the five was right by luck.
+
+The client is the **one place every response passes through**, so the fingerprint belongs
+there. `record_payload(url, payload)` hashes the canonical form of the parsed document and
+`payload_fingerprint()` folds every URL it read into one value. A fetcher now makes no
+judgement at all: one statement beside its run row, `registry.set_payload_fingerprint(conn, client)`.
+
+Canonical rather than raw, because a provider that reorders keys or changes whitespace
+has not changed what it said. `allow_nan` stays on, so a fingerprint is never the thing
+that raises — though the JSON reader already refuses a non-finite number in a response,
+so that guard is for a caller that decoded one itself.
+
+### 21.2 What a paged fetcher gets, and what a run with no client records
+
+`payload_fingerprint()` is a hash of the sorted `url digest` pairs, so a fetcher that
+read ten pages has one value that says it read ten pages, and two runs agree only when
+they asked the same questions and got the same answers.
+
+Three sites are not uniform, and the difference is stated rather than hidden:
+
+| case | what it records | why |
+| --- | --- | --- |
+| every fetcher | the provider response, through the client | the client read it and the run row is written from the same session |
+| `import-history` | the imported rows' own values | there is no provider; the input document *is* the rows, and that hash was already a content hash |
+| `store-evidence` | none | the client that read its document belongs to `evidence.fetch_evidence`, so there is nothing in that function's scope to ask |
+
+`record_failed_run` takes the session's fingerprint too: a failed fetch is not a fetch
+that read nothing, and it may have read several responses before it failed.
+
+### 21.3 The guard belongs in the registry, and the reason is a test double
+
+The first version passed `client.payload_fingerprint()` at each call site, and
+`tests/test_fetchers.py` — which replaces `HTTPClient` with a `Mock` — put a `Mock` in a
+`TEXT NOT NULL` column. The tempting fix is `hasattr` at each call site; twenty-two
+`hasattr`s to ask one question is the wrong shape, so the registry takes the client and
+asks it, and **refuses anything that is not a string**. A fingerprint column that can
+hold a non-string is a column whose contents cannot be compared, and the way that
+arrives in practice is a client replaced by a test double. Every one of the fifteen
+doubles then needed no change at all, which is the check on the decision: had this been
+the wrong place, the cost would have been fifteen edits.
+
+### 21.4 Measured
+
+Through the real code with the provider call stubbed, on `fetch-sentiment`:
+
+| run | `payload_sha256` |
+| --- | --- |
+| first success | `b6386d827af71ee6…` |
+| the same call again | `b6386d827af71ee6…` |
+| a response that differs by one reading | `fccb575549ecaed4…` |
+
+and on that registry `payload_hashed_runs: 3 of 3` — the series is no longer flagged
+blind to a content change, where before the work it was flagged on every run.
+
+### 21.5 Tests
+
+- **the fingerprint is of the payload**: after a `get_json`, the recorded value equals
+  the SHA-256 of the canonical form of what the caller received;
+- **key order and whitespace do not move it**, and a changed value does;
+- **a paged run differs from a single-page run**, so reading more is visible;
+- **a NaN does not break it**, asserted through `record_payload` because the JSON
+  reader refuses one in a response;
+- **a session that read nothing fingerprints nothing**;
+- **an explicit `payload_sha256=""` differs from not saying which**, so a run that
+  deliberately records none is not confused with one that inherited the session's;
+- **a client that cannot fingerprint records none rather than a junk value**, for four
+  kinds of unusable client;
+- **every fetcher that writes a run row sets the fingerprint**, checked over the source
+  with `main.py` named as the one exemption and the reason given.
+
+### 21.6 What this does not establish
+
+- A fingerprint says the document changed. It does not say the change was an
+  improvement, an error, or a provider revision, and nothing in the run history reads
+  it yet — `provider_health` publishes both figures and still does not compare them
+  across runs, because a comparison needs a statement about what a change would mean.
+- `store-evidence` still records no fingerprint, and `import-history` records one under
+  a different name than a provider response would. Both are stated in the table above
+  rather than smoothed into uniformity.
+- The doubles in the test suite now have a real `payload_fingerprint`, so a fetcher
+  tested through them produces a fingerprint that is not the real client's — which is
+  fine for a run row and would not be for a comparison across two such runs.

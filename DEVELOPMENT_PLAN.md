@@ -124,12 +124,14 @@ its values carried across unchanged and a migration note recorded, and a new
 `payload_sha256` holds the provider response where a fetcher has one. The monitor's flag
 became `no_payload_fingerprint` and now reports both figures per series.
 
-**22 of the 25 fetchers still store no content hash.** The rename made that gap
-legible; it did not close it, and closing it means each fetcher hashing its own
-response — twenty-two separate changes and a per-fetcher judgement about what is worth
-hashing. The rename would also have invented a finding on a read-only open of an older
-registry, reporting stored fingerprints as absent; the readers now ask the table which
-columns it has and the report names them in `fingerprint_columns`.
+**22 of the 25 fetchers still store no content hash** — as of the rename. **Closed
+2026-10-03** (`AUDIT.md` §21): the judgement about what "the payload" is was never the
+fetchers' to make, so `HTTPClient` now fingerprints every document it parses and each
+fetcher makes one statement beside its run row. Three sites differ by necessity and say
+so: `import-history` records the imported rows' values (there is no provider), and
+`store-evidence` records none (its client belongs to `evidence.fetch_evidence`). The guard
+against a client that cannot fingerprint lives in the registry rather than in twenty-two
+call sites — proven by the cost: it changed no test double at all.
 
 **The next queue, in order.** Items 1, 1a, the capability summary, 2 and 3 are
 closed above, as is failed-run recording across the fetcher family; the rest are

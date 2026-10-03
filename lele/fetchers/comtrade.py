@@ -209,6 +209,7 @@ def fetch_comtrade(conn, reporter_code="842", partner_code="0", hs_code="", limi
         warnings.append("result hit limit; older periods may be absent")
 
     import hashlib
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
@@ -409,6 +410,7 @@ def fetch_census_trade(conn, limit=MAX_LIMIT_DEFAULT, start=None, end=None,
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
     warnings = list(client.warnings)
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),

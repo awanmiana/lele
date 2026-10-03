@@ -153,6 +153,7 @@ def fetch_opensky_states(conn, limit=MAX_LIMIT_DEFAULT, time=None, icao24="", bb
         "params": params, "limit": limit
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     warnings = list(client.warnings)
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
@@ -284,6 +285,7 @@ def fetch_opensky_flights(conn, limit=MAX_LIMIT_DEFAULT, begin=None, end=None,
         "params": params, "limit": limit
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     warnings = list(client.warnings)
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),

@@ -118,6 +118,7 @@ def fetch_treasury(conn, limit=MAX_LIMIT_DEFAULT, start=None, end=None):
     warnings = list(client.warnings)
     if truncated:
         warnings.append("the page returned the full limit; older data may be absent")
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),

@@ -162,6 +162,7 @@ def fetch_eia(conn, series_ids, api_key, limit=MAX_LIMIT_DEFAULT, start=None, en
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
     warnings = list(client.warnings)
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),
@@ -304,6 +305,7 @@ def fetch_bls(conn, series_ids, limit=MAX_LIMIT_DEFAULT, start=None, end=None,
     }, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
     warnings = list(client.warnings)
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(),

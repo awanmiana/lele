@@ -161,6 +161,7 @@ def fetch_awards(conn, entity_id, ueis, limit=MAX_LIMIT_DEFAULT, start=None, end
     if unmatched:
         warnings.append(f"{unmatched} candidate award(s) were excluded because their Recipient UEI "
                         "was not in the explicit set")
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SOURCE, started.isoformat(), finished.isoformat(), query=",".join(sorted(expected)),

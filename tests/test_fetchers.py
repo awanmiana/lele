@@ -991,6 +991,74 @@ class HTTPTests(unittest.TestCase):
         self.client.opener.open.return_value = response
         return response
 
+    def test_a_response_is_fingerprinted_over_the_document_the_caller_received(self):
+        """The fingerprint has to be of the payload, or it describes nothing.
+
+        Asserting it against the canonical form of what `get_json` returned is the
+        contract: a provider that reorders its keys or changes its whitespace has
+        not changed what it said, and a fingerprint that moved on every run would
+        train a reader to ignore the one that matters -- the failure the run history
+        already showed.
+        """
+        import hashlib
+
+        self.assertEqual(self.client.payload_fingerprint(), "",
+                         "a session that read nothing fingerprints nothing")
+        self.respond(b'{"b": 2, "a": 1}')
+        served = self.client.get_json(self.url)
+        expected = hashlib.sha256(json.dumps(
+            served, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            default=repr).encode("utf-8")).hexdigest()
+        self.assertEqual(self.client.payloads[self.url], expected)
+        self.assertEqual(len(self.client.payload_fingerprint()), 64)
+
+    def test_a_reordered_and_reformatted_document_is_the_same_fingerprint(self):
+        other = http.HTTPClient(rate=0)
+        other.record_payload("u", {"b": 2, "a": 1})
+        same = http.HTTPClient(rate=0)
+        same.record_payload("u", {"a": 1, "b": 2})
+        self.assertEqual(other.payload_fingerprint(), same.payload_fingerprint())
+
+    def test_a_changed_response_changes_the_fingerprint(self):
+        self.respond(b'{"a": 1}')
+        self.client.get_json(self.url)
+        first = self.client.payload_fingerprint()
+        # No cache directory: the first client cached its answer, and reading it
+        # back would compare the fingerprint with itself.
+        other = http.HTTPClient(rate=0)
+        other.opener = Mock()
+        other.opener.open.return_value = Response(b'{"a": 2}', None, 200)
+        other.get_json(self.url)
+        self.assertNotEqual(other.payload_fingerprint(), first)
+
+    def test_a_paged_fetch_fingerprints_every_page_it_read(self):
+        first = self.url + "&page=1"
+        second = self.url + "&page=2"
+        for url in (first, second):
+            self.respond(b'{"data": []}')
+            self.client.get_json(url)
+        one = http.HTTPClient(cache_dir=self.temp.name, rate=0)
+        one.opener = Mock()
+        one.opener.open.return_value = Response(b'{"data": []}', None, 200)
+        one.get_json(first)
+        self.assertNotEqual(self.client.payload_fingerprint(), one.payload_fingerprint(),
+                            "a run that read more pages has read something else")
+
+    def test_a_nan_does_not_break_the_fingerprint(self):
+        """A fingerprint must not be the thing that raises on a provider's NaN.
+
+        The JSON reader refuses a non-finite number in a response, so this reaches
+        `record_payload` only from a caller that decoded one itself -- which is
+        exactly why the guard is in the hash and not at the boundary.
+        """
+        self.client.record_payload(self.url, float("nan"))
+        first = self.client.payload_fingerprint()
+        self.assertEqual(len(first), 64)
+        other = http.HTTPClient(rate=0)
+        other.record_payload(self.url, float("nan"))
+        self.assertEqual(other.payload_fingerprint(), first,
+                         "repr(NaN) is stable, so the hash is too")
+
     def error(self, code, retry=None):
         headers = Message()
         if retry is not None:

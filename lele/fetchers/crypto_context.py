@@ -212,6 +212,7 @@ def fetch_sentiment(conn, limit=365, end=None):
             "No accuracy, calibration or trading claim is made.",
         ],
     }
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, SENTIMENT_SOURCE, started.isoformat(), _now().isoformat(),
@@ -378,6 +379,7 @@ def fetch_stablecoin_supply(conn, limit=1200, end=None):
             "No accuracy, calibration or trading claim is made.",
         ],
     }
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, STABLECOIN_SOURCE, started.isoformat(), _now().isoformat(),
@@ -536,6 +538,7 @@ def fetch_market_activity(conn, entity_id, instrument_key, coin="bitcoin", days=
             "No accuracy, calibration or trading claim is made.",
         ],
     }
+    registry.set_payload_fingerprint(conn, client)
     registry.clear_failure_recorder(conn)
     registry.record_ingest_run(
         conn, ACTIVITY_SOURCE, started.isoformat(), _now().isoformat(),

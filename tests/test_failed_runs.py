@@ -315,6 +315,78 @@ class ClearingOnSuccess(FileRegistry):
         self.assertEqual(runs[0]["source"], "import-history")
 
 
+class PayloadFingerprints(unittest.TestCase):
+    """What a run row can now say about the document it read."""
+
+    def test_a_client_fingerprint_is_reached_through_the_registry(self):
+        class Client:
+            def payload_fingerprint(self):
+                return "a" * 64
+        with sqlite3.connect(":memory:", factory=db.Connection) as conn:
+            conn.row_factory = sqlite3.Row
+            registry._initialize(conn)
+            self.assertTrue(registry.set_payload_fingerprint(conn, Client()))
+            registry.record_ingest_run(conn, "x", START, START)
+            row = registry.list_ingest_runs(conn, limit=1)[0]
+        self.assertEqual(row["payload_sha256"], "a" * 64)
+
+    def test_a_client_that_cannot_fingerprint_records_none_rather_than_a_junk_value(self):
+        """A column that can hold a non-string cannot be compared later.
+
+        The way that arrives in practice is a client replaced by a test double, so
+        the guard belongs in the registry rather than in twenty-two callers.
+        """
+        class NoFingerprint:
+            pass
+        class Mock:
+            def payload_fingerprint(self):
+                return object()
+        for client in (NoFingerprint(), Mock(), None, 42):
+            with self.subTest(client=type(client).__name__):
+                with sqlite3.connect(":memory:", factory=db.Connection) as conn:
+                    conn.row_factory = sqlite3.Row
+                    registry._initialize(conn)
+                    self.assertFalse(registry.set_payload_fingerprint(conn, client))
+                    registry.record_ingest_run(conn, "x", START, START)
+                    self.assertEqual(registry.list_ingest_runs(conn, limit=1)[0]["payload_sha256"],
+                                     "")
+
+    def test_an_explicit_empty_fingerprint_differs_from_not_saying_which(self):
+        with sqlite3.connect(":memory:", factory=db.Connection) as conn:
+            conn.row_factory = sqlite3.Row
+            registry._initialize(conn)
+            registry.set_payload_fingerprint(conn, "b" * 64)
+            registry.record_ingest_run(conn, "inherited", START, START)
+            registry.record_ingest_run(conn, "explicit-none", START, START, payload_sha256="")
+            rows = {row["source"]: row["payload_sha256"]
+                    for row in registry.list_ingest_runs(conn, limit=5)}
+        self.assertEqual(rows["inherited"], "b" * 64)
+        self.assertEqual(rows["explicit-none"], "",
+                         "a run that deliberately records none is different from one that "
+                         "inherited whatever the session read")
+
+    def test_every_fetcher_that_writes_a_run_row_sets_the_fingerprint(self):
+        """Checked over the source, so a new fetcher cannot join without it.
+
+        Every fetcher in this project reads through one client, and the run row is
+        written from the same session, so the fingerprint is one statement beside
+        the row rather than a judgement twenty-two times over. `store-evidence` is
+        exempt and named: the client that read its document belongs to
+        `evidence.fetch_evidence`, so there is nothing in that function's scope to
+        ask, and the row records none rather than a guess.
+        """
+        root = Path(__file__).resolve().parent.parent / "lele"
+        missing = []
+        for path in sorted(root.rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            # `main.py` writes the one run row whose fetcher owns its own client.
+            if "record_ingest_run(" not in text or path.name in ("registry.py", "main.py"):
+                continue
+            if "set_payload_fingerprint(" not in text:
+                missing.append(str(path.relative_to(root)))
+        self.assertEqual(missing, [], f"these write a run row without fingerprinting: {missing}")
+
+
 class InMemory(FileRegistry):
 
     def test_an_in_memory_registry_records_the_failure_too(self):

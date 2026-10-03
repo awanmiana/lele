@@ -300,6 +300,7 @@ def import_price_history(conn, entity_id, path, interval="1d", now=None):
     if instrument["adjustment"] == "unknown":
         unknown.insert(0, "adjustment (stated as unknown: any split, distribution or roll "
                           "across the imported span is unrepaired)")
+    registry.set_payload_fingerprint(conn, records_hash)
     registry.clear_failure_recorder(conn)
     run_id = registry.record_ingest_run(
         conn, source="import-history", query=instrument["symbol"], indicator=interval,
