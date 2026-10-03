@@ -331,11 +331,19 @@ Each item is a limit this build cannot lift, with the reason it is still there.
    need a real key. `import-history` takes the export from the user instead.
 5. **Provider health.** `ingest_runs` records request and record hashes; nothing
    consumes them, so a source returning garbage is noticed by a human.
-6. **Unbounded growth.** `price_bars` and `move_events` grow forever. Irrelevant
-   for daily bars on one instrument, not for five-minute bars on many.
+6. **Unbounded growth.** **Closed for price history 2026-10-03** (§15):
+   `price_bars`, `move_events`, `volatility_estimates`, `cause_scans` and
+   `price_anomalies` can be cut by a recorded retention cut. Still open for
+   `context_measures`, which is bounded by its parent series and therefore by how
+   far a provider reaches, and for the observations themselves: cutting filed
+   evidence is a decision about evidence that this build will not take
+   automatically.
 7. **Type coverage.** The gate requires full annotations on the foundation
    modules and prevents the debt growing there; the historical modules still
-   carry bodies that are checked only by execution.
+   carry bodies that are checked only by execution. **Measured 2026-10-03: 612 of
+   743 functions in `lele/` still lack a complete signature** (`ast`, counting
+   any unannotated parameter or return). The earlier figure of 542 predates the
+   modules added since.
 
 ---
 
