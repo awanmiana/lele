@@ -94,9 +94,10 @@ class CLITests(unittest.TestCase):
         self.assertFalse(self.db.exists())
         self.assertEqual(set(COMMANDS), {"init", "sources", "version", "kinds", "list", "show", "stats", "countries", "fetch", "fetch-prices", "fetch-evidence", "fetch-cot", "fetch-short", "fetch-news", "fetch-form4", "fetch-13f", "fetch-material", "fetch-formd", "fetch-nport", "fetch-awards", "fetch-lobbying", "fetch-treasury", "fetch-political", "fetch-formadv", "fetch-formadv-individual", "fetch-comtrade", "fetch-census-trade", "fetch-eia", "fetch-bls", "fetch-opensky", "runs", "edges", "import", "import-history", "analyze", "finmap", "project", "compare", "prospective", "worldstate", "rag", "indicators", "episodes", "events", "volatility-analyze", "fetch-history", "fetch-sentiment",
                       "fetch-stablecoins", "fetch-market-activity", "fetch-news-feed",
-"moves", "causes", "scan", "explain", "capital", "store-evidence",
+"moves", "causes", "context", "prune", "scan", "explain", "capital",
+            "store-evidence",
                   "instruments", "volatility", "framework",
-                  "sentiment", "relationships", "tree", "backup", "doctor", "resolve", "sanctions", "flows", "observations", "links", "export", "menu"})
+                  "sentiment", "relationships", "tree", "backup", "doctor", "resolve", "sanctions", "flows", "observations", "links", "export", "summary", "menu"})
         self.assertEqual(set(MENU_LABELS), (set(COMMANDS) - {"menu"}) | {"help", "back", "quit"})
 
     def test_kinds_catalog_without_database(self):

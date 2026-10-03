@@ -72,8 +72,9 @@ class ControlDesignTests(unittest.TestCase):
     def test_controls_spread_across_the_whole_span_not_the_oldest_prefix(self):
         bars = [{"open_time": (BASE + timedelta(days=index)).isoformat()}
                 for index in range(400)]
-        windows = causes._control_windows(bars, [], 24, 10, KEY, 14400, BASE)
+        windows, eligible = causes._control_windows(bars, [], 24, 10, KEY, 14400, BASE)
         self.assertEqual(len(windows), 10)
+        self.assertEqual(eligible, 399)
         starts = [datetime.fromisoformat(window["end_exclusive"]) for window in windows]
         self.assertGreater(max(starts) - min(starts), timedelta(days=300),
                            "controls must span the series, not cluster at its start")
@@ -83,7 +84,8 @@ class ControlDesignTests(unittest.TestCase):
                 for index in range(60)]
         moves_at = [{"start_time": (BASE + timedelta(days=20)).isoformat(),
                      "end_time": (BASE + timedelta(days=25)).isoformat()}]
-        for window in causes._control_windows(bars, moves_at, 24, 30, KEY, 14400, BASE):
+        windows, _ = causes._control_windows(bars, moves_at, 24, 30, KEY, 14400, BASE)
+        for window in windows:
             start = datetime.fromisoformat(window["start_inclusive"])
             end = datetime.fromisoformat(window["end_exclusive"])
             self.assertFalse(start < datetime.fromisoformat(moves_at[0]["end_time"])
@@ -93,7 +95,21 @@ class ControlDesignTests(unittest.TestCase):
     def test_a_zero_control_request_returns_nothing(self):
         bars = [{"open_time": (BASE + timedelta(days=index)).isoformat()}
                 for index in range(20)]
-        self.assertEqual(causes._control_windows(bars, [], 24, 0, KEY, 14400, BASE), [])
+        windows, eligible = causes._control_windows(bars, [], 24, 0, KEY, 14400, BASE)
+        self.assertEqual(windows, [])
+        self.assertEqual(eligible, 19)
+
+    def test_the_eligible_count_is_reported_so_a_small_sample_is_visible(self):
+        """A thin control group must look thin in the report, not just in the data.
+
+        Requesting ten controls out of several hundred eligible ones is a choice,
+        and a reader comparing the group sizes needs to be able to see it.
+        """
+        bars = [{"open_time": (BASE + timedelta(days=index)).isoformat()}
+                for index in range(400)]
+        _, eligible = causes._control_windows(bars, [], 24, 10, KEY, 14400, BASE)
+        self.assertGreater(eligible, 100)
+        self.assertLess(10, eligible)
 
 
 class StoredContextProfileTests(unittest.TestCase):
@@ -395,6 +411,184 @@ class TierLadderTests(unittest.TestCase):
         self.assertEqual(wide["coverage"]["selected"], narrow["coverage"]["selected"])
         self.assertEqual(wide["summary"]["by_tier_direction"]["p3"],
                          narrow["summary"]["by_tier_direction"]["p3"])
+
+
+def test_the_profile_reports_how_many_controls_were_available(self):
+        """The defect this measures: 500 move windows against 10 controls.
+
+        The permutation test can only resolve a difference the smaller group can
+        express, so a thin control group must be visible as a thin control
+        group rather than read as a property of the market.
+        """
+        for day in range(120):
+            self._bar(day)
+            self._observation("social_sentiment", day)
+        for day in range(5, 115, 2):
+            self._move(day)
+        self.conn.commit()
+        thin = causes.profile_context(self.conn, KEY, 86400, move_hours=24, pre_hours=24,
+                                      permutations=200, controls=10)
+        self.assertEqual(thin["control_sampling"]["requested"], 10)
+        self.assertGreater(thin["control_sampling"]["eligible"], thin["move_windows"],
+                           "far more non-move timestamps were available than were used")
+        self.assertEqual(thin["control_sampling"]["used"], 10)
+        self.assertGreater(thin["control_sampling"]["move_to_control_ratio"], 5.0)
+        self.assertIn("requested sample", " ".join(thin["limitations"]))
+        wide = causes.profile_context(self.conn, KEY, 86400, move_hours=24, pre_hours=24,
+                                      permutations=200, controls=100)
+        self.assertGreater(wide["control_sampling"]["used"], thin["control_sampling"]["used"])
+        self.assertEqual(wide["control_sampling"]["eligible"],
+                         thin["control_sampling"]["eligible"],
+                         "eligibility is a property of the stored data, not the request")
+
+
+class StoredWindowVerificationTests(unittest.TestCase):
+    """A stored move row is a claim, and the bars are the only evidence for it.
+
+    `detect` refuses a candidate whose window spans a hole or whose elapsed time
+    is not the requested horizon. A row written before that check existed carries
+    no such guarantee, so a reader that trusts it attributes a result to a window
+    the detector would refuse. These tests build exactly the row a superseded
+    detector would have left behind and require it to be refused.
+    """
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        registry_init(self.conn)
+        self.addCleanup(self.conn.close)
+        registry_entity(self.conn)
+        for day in range(30):
+            registry_add_bar(self.conn, BASE + timedelta(days=day), 100.0)
+
+    def _row(self, start_day, end_day, move_hours=24, tier="p10", identifier=1):
+        return {"id": identifier, "tier": tier, "direction": "down",
+                "start_time": (BASE + timedelta(days=start_day)).isoformat(),
+                "end_time": (BASE + timedelta(days=end_day)).isoformat(),
+                "move_hours": move_hours, "change_percent": "-20"}
+
+    def test_a_window_with_no_hole_and_the_right_length_is_kept(self):
+        from lele.analysis import moves
+        kept, refused = moves.verify_stored(self.conn, KEY, 86400, [self._row(10, 11)])
+        self.assertEqual([row["id"] for row in kept], [1])
+        self.assertEqual(refused, [])
+
+    def test_a_window_spanning_a_missing_bar_is_refused(self):
+        from lele.analysis import moves
+        self.conn.execute("DELETE FROM price_bars WHERE open_time=?",
+                          ((BASE + timedelta(days=15)).isoformat(),))
+        self.conn.commit()
+        kept, refused = moves.verify_stored(self.conn, KEY, 86400, [self._row(10, 16)])
+        self.assertEqual(kept, [])
+        self.assertEqual(len(refused), 1)
+        self.assertIn("a bar is missing inside", refused[0]["reason"])
+        self.assertEqual(refused[0]["move_event_id"], 1)
+
+    def test_a_window_that_does_not_cover_its_recorded_move_length_is_refused(self):
+        from lele.analysis import moves
+        kept, refused = moves.verify_stored(self.conn, KEY, 86400,
+                                           [self._row(10, 18, move_hours=24)])
+        self.assertEqual(kept, [])
+        self.assertIn("does not cover the recorded move length", refused[0]["reason"])
+
+    def test_a_window_whose_bars_are_gone_is_refused(self):
+        from lele.analysis import moves
+        self.conn.execute("DELETE FROM price_bars")
+        self.conn.commit()
+        kept, refused = moves.verify_stored(self.conn, KEY, 86400, [self._row(10, 11)])
+        self.assertEqual(kept, [])
+        self.assertIn("no stored bars to verify", refused[0]["reason"])
+
+    def test_a_backwards_window_is_refused(self):
+        from lele.analysis import moves
+        kept, refused = moves.verify_stored(self.conn, KEY, 86400, [self._row(20, 15)])
+        self.assertEqual(kept, [])
+        self.assertIn("does not run forwards", refused[0]["reason"])
+
+    def test_the_same_rules_the_detector_applies_are_what_verifies_a_row(self):
+        """Every window detect retains must verify, or the readers disagree with it."""
+        from lele.analysis import moves
+        closes = [100.0] * 40
+        for index in range(40, 75):
+            closes.append(closes[-1] * 0.985)
+        for index, close in enumerate(closes):
+            registry_add_bar(self.conn, BASE + timedelta(days=index), close)
+        detected = moves.detect(self.conn, KEY, 86400, move_hours=24, thresholds=(1,),
+                                baseline_bars=30, limit=200, store=True)
+        self.assertTrue(detected["moves"])
+        rows = [dict(row) for row in self.conn.execute("SELECT * FROM move_events")]
+        kept, refused = moves.verify_stored(self.conn, KEY, 86400, rows)
+        self.assertEqual(refused, [])
+        self.assertEqual(len(kept), len(rows))
+
+    def test_the_stored_context_profile_leaves_a_stale_window_out_and_says_so(self):
+        """The case this whole change exists for.
+
+        A superseded detector stored a row whose window covers four days while
+        labelling it a 24-hour move. The profile used to read that row, so its
+        pre-window was anchored to the wrong date and the row counted as a move
+        window it never was.
+        """
+        for day in range(30):
+            registry_add_bar(self.conn, BASE + timedelta(days=day), 100.0)
+            registry_add_observation(self.conn, "stablecoin_supply", day)
+        windows = [(6, 7), (12, 13), (18, 19), (24, 25), (9, 13)]
+        for start_day, end_day in windows:
+            self.conn.execute(
+                """INSERT INTO move_events(instrument_key, interval_seconds, move_hours, tier,
+                     threshold_percent, direction, start_time, end_time, start_price, end_price,
+                     change_percent, terminal_bar_range_percent, baseline_mean_percent,
+                     baseline_std_percent, z_score, baseline_bars, detected_at, available_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (KEY, 86400, 24, "p3", "3", "down",
+                 (BASE + timedelta(days=start_day)).isoformat(),
+                 (BASE + timedelta(days=end_day)).isoformat(), "100", "90", "-10", "5",
+                 "0", "2", "-5", 30, "2026-06-01T00:00:00+00:00", "2026-06-01T00:00:00+00:00"))
+        self.conn.commit()
+        result = causes.profile_context(self.conn, KEY, 86400, move_hours=24, pre_hours=24,
+                                        permutations=200, controls=10)
+        self.assertEqual(result["unverified_move_windows"], 1,
+                         "the mislabelled window must be counted, not used")
+        self.assertEqual(result["move_windows"], 4)
+        reasons = " ".join(item["reason"] for item in result["uncovered_sample"])
+        self.assertIn("detector would refuse", reasons)
+        self.assertIn("does not cover the recorded move length", reasons)
+
+    def test_the_window_report_counts_only_verified_moves(self):
+        from lele.analysis import timeline
+        registry_entity(self.conn)
+        for start_day, end_day in ((25, 26), (22, 26)):
+            self.conn.execute(
+                """INSERT INTO move_events(instrument_key, interval_seconds, move_hours, tier,
+                     threshold_percent, direction, start_time, end_time, start_price, end_price,
+                     change_percent, terminal_bar_range_percent, baseline_mean_percent,
+                     baseline_std_percent, z_score, baseline_bars, detected_at, available_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (KEY, 86400, 24, "p3", "3", "down",
+                 (BASE + timedelta(days=start_day)).isoformat(),
+                 (BASE + timedelta(days=end_day)).isoformat(),
+                 "100", "90", "-10", "5", "0", "2", "-5", 30,
+                 "2026-06-01T00:00:00+00:00", "2026-06-01T00:00:00+00:00"))
+        self.conn.commit()
+        report = timeline.explain(
+            self.conn, 1, (BASE + timedelta(days=25)).isoformat(),
+            (BASE + timedelta(days=29)).isoformat(), move_hours=24, pre_hours=24,
+            thresholds=(3,))
+        self.assertEqual(report["moves"]["unverified_rows"], 1)
+        self.assertEqual(report["moves"]["total_rows"], 1)
+
+
+def registry_add_observation(conn, kind, day):
+    from lele.core import registry
+    moment = BASE + timedelta(days=day)
+    registry.add_observation(
+        conn=conn, source="test", external_id=f"{kind}-{day}", kind=kind,
+        description=f"{kind} on day {day}", amount="1", unit="usd",
+        occurred_at=moment.isoformat(), observed_at=moment.isoformat(),
+        available_at=(moment + timedelta(days=1)).isoformat(),
+        source_url="https://example.com/a")
 
 
 def registry_add_bar(conn, moment, close):

@@ -177,22 +177,26 @@ $ .tools/check.sh
 all checks passed
 ```
 
-- 698 offline tests, `ResourceWarning` promoted to an error, so a leaked
-  database handle fails the run.
+- **1013 offline tests**, `ResourceWarning` promoted to an error, so a leaked
+  database handle fails the run. Last run 2026-10-03.
 - `ruff check` clean over `lele/` and `tests/` under the strict profile.
-- `mypy` clean over 53 source files, with `disallow_untyped_defs` enforced on
+- `mypy` clean over **61 source files**, with `disallow_untyped_defs` enforced on
   the foundation modules.
-- `python -m compileall -q lele` clean.
+- `python -m compileall -q lele tests` clean.
 - Live end-to-end on 2026-09-28: `init` → `fetch fdic` (50 institutions) →
   `fetch-history 1 BTCUSDT` (799 real daily bars) → `moves` (124 candidates,
   100 retained, all exactly 24.0000 h, 0 gaps) → `scan` and `causes context`.
   Where nothing is stored, the output says so rather than inventing a result.
+- Live end to end on 2026-10-03 for retention: `prune plan` and `prune apply`
+  against a **copy** of the §12 registry, and `explain` afterwards for a window
+  inside the removed period (§15.7).
 
 New test files, each of which fails without its fix:
-`tests/test_db_guarantees.py` (18), `tests/test_clock.py` (12),
+`tests/test_db_guarantees.py` (19), `tests/test_clock.py` (12),
 `tests/test_price_gaps.py` (9), `tests/test_window_queries.py` (35),
-`tests/test_window_cli.py` (20), plus rewritten
-`tests/test_realtime_prospective.py` (8, offline).
+`tests/test_window_cli.py` (20), `tests/test_retention.py` (44),
+`tests/test_capability.py` (31), `tests/test_context_measures.py` (50), plus
+rewritten `tests/test_realtime_prospective.py` (8, offline).
 
 ---
 
@@ -571,3 +575,566 @@ Neither correction changes what this project does; both change how firmly it can
 why. The 0.9 five-minute objective stays exactly where it was, recorded as an
 aspiration rather than a gate: a target that cannot be met provides no gradient and
 is precisely the kind of constant that gets quietly lowered.
+
+## 12. Re-establishing M04/M05, and the two defects the re-run found
+
+`DEVELOPMENT_PLAN.md` opened with one item ahead of everything else: the recorded
+negative finding — that stablecoin supply and the crypto fear and greed index carry
+no discriminative power for this question — was produced by code that could
+mis-measure a window, so it should not be cited until re-run. This section is that
+re-run, and it found two more defects on the way. **Both are the species this audit
+keeps finding: a report that does not say what it did not do.**
+
+### 12.1 What the re-run used, and why it is a re-establishment and not a replay
+
+The database that produced the recorded numbers no longer exists on this host:
+`~/.finworld/finworld.db` holds 65 observations from SEC, OpenSky, EIA and Treasury
+sources and **zero rows in `price_bars` and zero in `move_events`**. The historical
+bars were gone, so the recorded figures could not be recomputed on the same inputs.
+What could be done, and was done in a throwaway registry at `/tmp/m0405/lele.db` so
+the existing research database was not written to, is to rebuild the whole chain from
+the same keyless sources and measure it again end to end:
+
+| step | result |
+| --- | --- |
+| `instruments add 1 BTCUSDT binance-spot bitcoin USDT unadjusted` | `rights_verified` false, `rights_basis` unknown |
+| `fetch-history 1 BTCUSDT --interval 1d --limit 4000 --pages 4` | 3332 daily bars, 2017-08-17 to 2026-10-01; 1 malformed row and 1 unclosed candle skipped, both counted |
+| `moves 1 --interval 1d --move-hours 24 --thresholds 3 5 7 11` | 856 candidates, 628 retained moves, 1169 tier rows; p3 628, p5 323, p7 173, p11 45; measured cadence 86400 s, **1 gap**, contiguous fraction 0.9997 |
+| `fetch-stablecoins` | 1200 daily observations, 2023-06-21 to 2026-10-02 |
+| `fetch-sentiment --limit 3000` | 3000 daily observations |
+| `fetch-market-activity 1 --coin bitcoin --days 365` | 364 instrument-bound observations, 2025-10-04 to 2026-10-02 |
+
+The detector reproduced the recorded counts exactly — 856 candidates, 628 retained
+moves, and the same per-tier totals — which is the first thing worth recording, and
+worth recording for a reason that is easy to get wrong. **It does not show the
+recorded results were correct.** It shows that on a bar set extended by six days,
+the corrected detector picks the same 628 windows. The gap exclusion changed
+nothing here because the single gap sits at index 175 and no retained window spans
+it. The corrected detector was therefore never the reason the numbers differ below.
+
+### 12.2 Defect: a stored move row was trusted without re-checking its window
+
+`moves.detect` refuses a candidate whose window spans a missing bar or whose real
+elapsed time is not the requested horizon. Nothing ever checked that a **stored**
+`move_events` row still describes such a window. All four readers of stored moves
+took the row's word for it: `causes.attribute`, `causes.profile`,
+`causes.profile_context` and `timeline.explain`. So a row written by a superseded
+detector — or by a run whose bars have since been pruned or replaced — would have
+its pre-window anchored to the wrong date and be counted, compared and reported as a
+move window of a length the current detector would refuse. That is the exact failure
+the plan said had to be fixed before the results could be cited, and it was still
+live in the readers.
+
+Fixed by `moves.verify_stored`, which re-derives the cadence, the gap set and the
+horizon from the stored bars and splits rows into kept and refused with a named
+reason: a bar missing inside the window, a start or end bar no longer stored, a
+backwards window, a length that is not the recorded move length, or no stored bars
+at all to check against. All four readers now call it, and each reports what it
+dropped: `profile_context` and `profile` as `unverified_move_windows`,
+`attribute` as `moves_unverified`, `timeline.explain` as `unverified_rows`.
+
+One implementation bug was caught by the tests rather than by the live run, which
+is the usual order. The first version returned every row as kept when the registry
+held no bars at all — the one situation in which nothing can be verified, and
+therefore the one in which trusting the rows is least defensible. Now nothing is
+kept and every row is refused. On the live data the count of refused rows is **0**,
+because the detector wrote them, so this fix changes no recorded number; it removes
+the possibility that a future stale row silently changes one.
+
+### 12.3 Defect: the control group's size was set by a default and never reported
+
+Running the profile revealed that `--controls` defaults to 10. The first live run
+of this re-establishment therefore compared **526 move windows against 9 control
+windows** and reported it in exactly the same shape as any other result. The library
+default is `max(40, 2 * len(move_windows))`; the CLI's 10 overrode it in both
+directions — small against a 40-window run, and small by a factor of fifty against a
+526-window one.
+
+This is not a rounding matter. A permutation test can only resolve a difference the
+smaller group can express, so with 9 controls the coarsest observable move-to-control
+share difference is about 0.11 and the raw p-value on the measured-mean test came out
+at 0.93 for stablecoin supply where a properly powered run gives 0.031. **The
+thin-control run was not merely weaker, it pointed the other way.** A reader had no
+way to know, because the report published `control_windows: 9` and said nothing about
+the 1948 eligible non-move timestamps that were never sampled.
+
+`_control_windows` now returns how many timestamps were eligible before thinning, and
+`profile_context` publishes it as `control_sampling`: `requested`, `eligible`, `used`,
+`dropped_without_coverage` and the move-to-control ratio, with a note saying that a
+small `used` against a large `eligible` means the power was set by the request rather
+than by the data. `attribute` publishes `controls_eligible`. The CLI help now says
+that 10 is a quick look and not a powered comparison. The default itself was left at
+10: changing it would silently restate every recorded figure, which is the mirror
+image of this defect.
+
+### 12.4 The result, at a control group that can resolve something
+
+`causes context 1 --interval 1d --move-hours 24 --pre-hours 24 --tier pN --controls 500`,
+499 control windows used against 1948–2940 eligible at every tier:
+
+| tier | move windows | controls | stablecoin supply difference (move − control) | raw p | adjusted p | drift |
+| --- | --- | --- | --- | --- | --- | --- |
+| p3 | 526 | 499 | −$15.79bn (−7.01%) | 0.031 | **0.093** | 2.33 sd |
+| p5 | 252 | 499 | −$12.26bn (−5.52%) | 0.251 | 0.673 | 2.33 sd |
+| p7 | 124 | 499 | −$27.58bn (−12.45%) | 0.127 | 0.382 | 2.33 sd |
+| p11 | 30 | 499 | +$14.25bn (+6.46%) | 0.728 | 0.728 | 2.33 sd |
+
+**The qualitative negative finding reproduces: nothing survives the Benjamini-Hochberg
+correction at any tier, and `inference_status` reports that no category stands out
+against the control windows.** The fear and greed index gives no significant
+difference at any tier (adjusted p between 0.27 and 0.93) and no drift.
+`market_activity` gives no significant difference either, over the one year its
+coverage actually reaches.
+
+**One recorded pattern does not reproduce, and that is the substantive change.**
+`WORKLOG.md` recorded stablecoin supply at −$31.5bn (adjusted 0.009) at p3 growing
+monotonically to −$52.4bn (adjusted 0.0015) at p7 — "a monotone pattern in move size,
+which is the shape a real effect would have". Re-run on the corrected detector with a
+powered control group, the difference is negative at p3, p5 and p7 and **positive at
+p11**, no tier reaches adjusted p ≤ 0.05, and the closest is p3 at 0.093 against a
+stated alpha of 0.05. The monotone shape was an artifact of a small control group
+drawn from a different part of a series that rises by an order of magnitude. The
+conclusion that survived, and that still stands, is the one the old run also reached
+for the wrong reason: the level is confounded with when the windows sit, drifting
+2.33 standard deviations, and a trending level cannot be tested this way at all.
+
+This is the first recorded result of this project that a re-run has **overturned**
+rather than confirmed, and it happened because the measurement improved rather than
+because the market changed. `DEVELOPMENT_PLAN.md` asked for exactly this and the
+answer it produced is the honest one.
+
+### 12.5 What this does not establish
+
+- The re-run is one instrument, one interval, one 24-hour pre-window and one set of
+  three free context series on one day. It is a re-establishment of a recorded
+  negative finding, not a survey.
+- Every context series is daily, so a 24-hour pre-window is saturated: presence
+  carries no information and only the measured-mean difference is testable. That
+  limitation is unchanged and still bounds everything downstream.
+- `market_activity` reaches 365 days, which leaves 37 usable move windows at p3 and
+  1 at p11. Those rows are reported and are not evidence either way.
+- The bars are one venue's unadjusted spot prices with no independent market-truth
+  check, and the stablecoin supply series is an aggregate the project does not audit.
+- No cause is established. Nothing here says capital left before a move, and nothing
+  here forecasts price.
+
+## 13. A capability summary, and the two false claims building it exposed
+
+`lele menu` already ran every command, but the project had no way to *read* its own
+surface area: a reader wanting to know what `lele` can do had to read 70 CLI
+descriptions in `COMMANDS` and then the argument parser, and any prose summary of
+the capabilities would have started decaying the day after it was written.
+`lele summary` is that inventory, **generated from the code**.
+
+### 13.1 Why it is generated rather than written
+
+Every list in the document is read at run time from the thing it describes: the
+command table and the argument parser, the source catalogue, the endpoint
+allowlist, the observation taxonomy, the volatility estimator list, the frozen
+indicator specs, the frozen forecast methods, the cited frameworks, and the
+standing-objective constant. A feature added with a command gets a line in the
+file without anyone writing one, and a command removed disappears from it. The
+tests pin that contract rather than the document: every command is described, a
+relabelled command changes the rendered output, and a table entry with no parser
+is refused rather than summarised.
+
+### 13.2 Defect: "5 public sources" understated the program's reach by tenfold
+
+The first draft counted `sources.list_sources()` and printed **5 public sources**.
+That number is the catalogue behind the `fetch` command and nothing else. The
+price, evidence, sanctions and redirect allowlists add **43 more entries across 20
+further hosts**, including CFTC, FINRA, GDELT, OFAC, the UN consolidated list, the
+EU FSF extract, OpenSky, Binance, CoinGecko, DefiLlama, the fear and greed index,
+Treasury Fiscal Data, the Federal Register, USAspending, Senate LDA, EIA, BLS, SEC
+IAPD and Google News. A count of 5 attached to the words "public sources" is the
+same defect class as §10: a number that reads as a property of the whole program
+and is a property of one command. The document now separates **registry datasets
+behind `fetch`** from the **endpoint allowlist**, and names the hosts, because an
+allowlist is the real boundary of what can be reached and a reader can check it.
+
+### 13.3 Defect: the read-only table asserted read-only access for a writing command
+
+`causes.attribute` and the other readers needed the CLI's read-only classification
+so the summary could say what each command does to the registry. Reading
+`READ_ONLY_ACTIONS` surfaced three **dead entries** — `explain`, `capital` and
+`store-evidence` each mapped an action named `all`, and none of the three has an
+`action` argument, so none of the entries could ever match. Two were merely
+redundant with `READ_ONLY_COMMANDS`. The third was `store-evidence`, **which
+writes**: the day it grew an `action` argument named `all`, that entry would have
+handed a working fetch a read-only handle and turned it into a "database is
+readonly" failure. The rendered summary was already repeating the false claim, as
+"read-only for `all`; other actions write", which is the worst of both.
+
+The entries are removed and the table can no longer rot silently:
+`tests/test_db_guarantees.py` now fails if an entry names an action its parser does
+not offer, or if a command appears in both tables, and `NEVER_OPENS_REGISTRY` names
+the three commands that never open the database at all so the summary can say
+"does not open the registry" instead of guessing. A command whose access depends
+on its action is labelled with the actions that only read, because collapsing it
+either way would be a false statement.
+
+### 13.4 What this does not establish
+
+The document is an inventory. A command appearing in it says the program offers a
+measurement; it does not say the measurement is right, that a provider answered,
+that the stored records describe a population, or that any of the negative results
+recorded in §12 changed. It carries `completeness: unknown` even when every table
+is counted, and the phrases it must never contain are asserted by a test.
+
+## 14. Stationary context quantities, and a plan item that was not true
+
+`DEVELOPMENT_PLAN.md` item 1a asked for context to be stored as a stationary
+quantity, on the ground that `stablecoin_supply` drifts 2.33 standard deviations
+across the compared windows at every tier (§12.4) and a trending level cannot be
+compared between groups whose windows sit at different dates however large the
+sample. That is now built, and building it overturned half of the item's own
+reasoning.
+
+### 14.1 Defect: the plan asserted a provider reach that does not exist
+
+The item said extending `market_activity` over years "needs no new provider",
+because the CoinGecko `market_chart` endpoint accepts any `days` value. **Measured,
+it does not.** One bounded request per value, keyless, through this project's own
+HTTP client on 2026-10-02:
+
+| request | result |
+| --- | --- |
+| `days=365` | HTTP 200, 366 daily points, 2025-10-03 to 2026-10-02 |
+| `days=400` | **HTTP 401**, "verify parameters and API access policy" |
+| `days=1000` | **HTTP 401**, same |
+
+So `MAX_ACTIVITY_DAYS = 365` is not a choice this project made; it is where the
+free tier stops, and the constant now has that as its reason. Raising it would have
+produced a fetcher that passes its own validation and then fails on every call
+beyond a year. `market_activity` consequently still reaches 365 days, p11 still
+leaves it one measured move window, and the only route to a multi-year
+instrument-bound capital series is a provider plan this project will not obtain by
+fabricating a credential. That is recorded as a measured limit, not as a task.
+
+### 14.2 Defect: a stored parameter that no longer reproduced the number beside it
+
+This one was found by the tests, and it is the same species as §10 and §13.2: a
+field whose name claims something the value does not support. Storing a z-score's
+baseline mean and spread at the eight-decimal scale used for the score itself
+turns a spread of 1e-24 into `0.00000000`. The row would then carry a score
+computed by dividing by a non-zero number next to a stored parameter saying the
+denominator was zero — and the reason the parameters are stored at all, in this
+project and in `volatility_estimates`, is that the value alone is not
+reproducible. Parameters are now written at 20 significant digits, the budget is
+stored on the row, and a parameter that rounds away entirely is **refused by
+name** (`value_not_representable`) rather than stored as a zero.
+
+A second instance of the same family: `str(Decimal('0E-8'))` is `'0E-8'`, which
+is not a finite decimal string to the registry that has to hold it, so a
+perfectly ordinary small value would have raised out of `store` as an opaque
+`ValueError` from `registry._decimal_text` rather than being counted. Exponent
+notation is now rendered out, and the count of values the scale cannot carry is
+in the report.
+
+### 14.3 What was built, and why the derived rows are not observations
+
+`analysis/stationarity.py` derives two quantities from stored context series:
+`change` (the difference from the previous stored value, unit
+`<parent unit>_change_per_<cadence>s`) and `zscore` (the value against its own
+trailing baseline through `volatility.z_score`, baseline excluding the point
+scored, minimum 60 observations — the minimum `MIN_BASELINE_Z` already requires).
+`rate` and `ratio` are named in `NOT_OFFERED` with the reason each is not offered,
+and the capability summary quotes them, so a deliberate omission cannot read as an
+oversight.
+
+They are stored in a **new `context_measures` table (schema v18), not in
+`observations`**. That is the one design decision worth defending, because the
+cheaper route was a new observation kind. A derived quantity is not a second
+reading of the world. Putting it in `observations` would let a difference and a
+level be listed side by side as if both had been observed, would put it through
+every reader of that table — `signals.stored`, the world-state evidence projection,
+the flow attribution sums, `lele observations list` — none of which has any way to
+know that one of the two numbers is a difference of the other. The parameters are
+real columns for the same reason `volatility_estimates` stores `ddof`:
+`baseline_observations` is part of the uniqueness key, so a score against 60 points
+cannot silently overwrite one against 120, and a reader shown two baselines is
+told so instead of being handed one of them.
+
+Every derivation follows the move detector's own rules: cadence is **measured**
+from the stored timestamps, not read from a label; a difference spanning a hole is
+**refused, not computed**; every refusal is counted by name
+(`interrupted`, `no_prior_point`, `baseline_short`, `flat_baseline`,
+`unit_changed`, `not_increasing`, `repeated_timestamp`,
+`too_short_to_measure_cadence`, `unparsable_value`, `no_stored_level`,
+`value_not_representable`), and a test asserts that every name in `REFUSALS` is
+reachable from some input, because a refusal reason nothing can trigger is one a
+reader cannot rely on being told. `not_increasing` can only arise from a row
+written past `add_observation`, which normalises timestamps to UTC — it fires when
+ISO text order and instant order disagree, which is a real thing a foreign writer
+can do.
+
+### 14.4 The result: the comparison becomes possible, and it is negative
+
+`causes context 1 --controls 500 --measure change --measure zscore`, on a copy of
+the §12 registry at `/tmp/1a/live.db` with the measures derived from the same
+stored rows. 499 controls used at every tier.
+
+| tier | series | drift before | drift after | raw p after | adjusted p after |
+| --- | --- | --- | --- | --- | --- |
+| p3 | stablecoin_supply level | 2.334 | — | 0.031 | 0.093 |
+| p3 | stablecoin_supply **change** | — | **0.039** | 0.161 | 0.193 |
+| p3 | stablecoin_supply **zscore** | — | 0.723 | 0.099 | 0.157 |
+| p5 | stablecoin_supply change | — | **0.026** | 0.589 | 0.848 |
+| p7 | stablecoin_supply change | — | **0.162** | 0.800 | 0.960 |
+| p11 | stablecoin_supply change | — | **0.048** | 0.797 | 0.967 |
+
+**The drift confound is gone — 2.33 sd falls to 0.03–0.16 — and the comparison it
+was blocking is negative.** The level's nearest approach, adjusted 0.093 at p3,
+becomes 0.193 on its change and 0.157 on its z-score. Nothing in the measure family
+survives the correction at any tier, and `inference_status` reports zero
+survivors in both the level and the measure section.
+
+Three things about that number, stated because they are easy to misread.
+
+1. **The measure family corrects six tests, the level family three.** Adjusted
+   values are not comparable across the two sections. The report says so in
+   `measures.multiple_testing.note`, because quoting whichever of the two clears the
+   correction would be selecting on the outcome.
+2. **The default is off.** `--measure` is not passed by default and every recorded
+   figure in §12 was produced without it. A default run was diffed against the
+   `--measure` run on the same registry: the `kinds` and `families` sections are
+   byte-identical and the `measures` key is absent. A feature that made the older
+   numbers look cleaner by default would have restated them.
+3. **`zscore` does not fully remove the drift** (0.72–0.84 sd) where `change`
+   does, and it costs `MINIMUM_BASELINE` points at the start of the series and its
+   own coverage: 1141 days against the change's 1200. That is stated in the report
+   rather than rounded into a claim that both are equivalent.
+
+The item's premise held — removing the calendar trend was the only route to a
+testable comparison from these series — and the testable comparison is negative.
+`market_activity@binance:BTCUSDT` remains untestable at p11 with one measured move
+window, exactly as §12.4 recorded, because §14.1 is why.
+
+### 14.5 What this does not establish
+
+- The derived rows are a re-expression of stored observations. Nothing here observed
+  anything, and no amount is a net inflow, a purchase, a sale or an actor.
+- Stationarity removes one confound. It does not make any context series a cause of
+  a move, it does not remove the unmatched control design, and it does not fix the
+  saturated 24-hour pre-window that §12.5 recorded.
+- The eligible series are a list, not a rule, because the property is not inferable
+  from the data: six irregularly dated insider trades also admit a measured cadence,
+  and differencing them would produce a number in shares that reads as a change in
+  holdings. `insider_trade` and `fund_flow` are excluded on that ground, and the
+  list carries a reason per entry that a test enforces.
+- Re-deriving over unchanged stored rows rewrites the same rows: 8943 stored
+  measures before and after a second full derivation, confirmed on the live copy.
+  That is what makes the stored value reproducible, and it also means a restatement
+  of a past level changes every derived point after it. Nothing recomputes them.
+- The transform is chosen by the operator. `change` needs no tuned parameter;
+  `zscore` needs a baseline length, and a reader who wanted to buy a result could
+  try several. The stored `baseline_observations` is what makes that visible rather
+  than invisible, and a series carrying two of them is reported as not compared
+  rather than resolved.
+
+## 15. Retention, and four defects — three of them older than this round
+
+Queue item 2 since the reliability audit: `price_bars` and `move_events` grow for
+as long as a fetcher runs. This section records the cut, the four defects found
+while building it, and the one that the build itself introduced and the tests
+caught.
+
+### 15.1 Defect: the schema inventory had drifted, so `doctor` stopped being able to fail
+
+`core/schema.py` opens by claiming the expected table and index inventory is
+derived from the same source as the DDL rather than restated by hand. It was two
+hand-maintained `frozenset` literals. Schema v18 added `context_measures` and
+`idx_context_measures_series` to the DDL and to neither list.
+
+Measured, before the fix: a schema-v18 database with `context_measures` dropped
+reports **29 tables present, 0 missing**, opens through `db.initialize` without
+complaint, and fails later with `no such table: context_measures` from the one
+command that reads it — `lele context`. That is defect A11 (§3) returning through
+a different door, because the promise `doctor` keeps is only as good as the
+inventory behind it, and §3 fixed the check while leaving the list it reads
+unverified.
+
+Both sets are now read out of the DDL by `schema.declared_objects()`, which raises
+on a statement it cannot parse rather than skipping it, and
+`tests/test_db_guarantees.py` drops **every** declared table and index in turn and
+requires the inventory to name it. Thirty-two objects, so the list cannot be
+correct by accident and cannot drift again.
+
+### 15.2 Defect: a leaked connection in the test suite, found by a failure in an unrelated test
+
+The full-suite run failed twice, in two *different* tests, both asserting that an
+error message contains no traceback:
+
+```
+Exception ignored while finalizing database connection <sqlite3.Connection ...>:
+ResourceWarning: unclosed database in <sqlite3.Connection object at 0x...>
+```
+
+The frame named `db.py:208 in _state`, which is where the garbage collector
+happened to finalise the connection, not where it leaked. The leak was in the
+suite's own helper: `tests/test_capability.py::_registry()` and `_broken()`
+returned an open in-memory connection, and neither call site closed it. A leak
+that asserts nothing is invisible until an unrelated `gc.collect()` turns it into
+some other test's failure — which is how §3's A7 guarantee (`ResourceWarning` as an
+error) caught a defect in the test that was written to satisfy it. Both helpers
+are context managers now, and running that module alone under the same warning
+rule reports zero.
+
+The general lesson is the one this audit keeps: **a failure in a test that
+asserts something unrelated is a finding, not noise.** Two runs failing in two
+different tests is what made it findable at all; had they failed in the same test
+it would have looked like flakiness.
+
+### 15.3 Defect: a frozen vocabulary that was sorted rather than quoted
+
+`capability._taxonomy()` reported `sorted(prospective.METHODS)` under
+`frozen_forecast_methods` while `tests/test_capability.py` asserts it equals
+`list(prospective.METHODS)`. The two differ — `constructed_indicator_v1` sorts
+before `five_minute_persistence_v1` — so the test failed **in the tree as found**,
+before this round changed anything. The §13 handoff recorded a green gate, so this
+was introduced after that gate ran, and it is recorded here because a handoff
+document claiming a green gate is a claim like any other and this one was stale.
+
+The test is the contract ("quoted not summarised"), so the module quotes the
+declared order. `tests/test_packaging.py` had the same species of duplication —
+`REGISTRY_SCHEMA_VERSION == 18`, a second literal to forget on every migration —
+and now compares against `core.schema.SCHEMA_VERSION`, which is the guarantee worth
+having: the constant and the DDL it names cannot disagree.
+
+### 15.4 Defect, found live: a read-only open on an older registry
+
+`lele prune runs` against the §12 registry (schema v18, 19 MB) failed with
+`database error`. A read-only open never migrates, so `prune_runs` does not exist
+there, and the query raised `no such table`. That is this project's own rule — a
+registry that cannot answer the question says so rather than guessing — applied to
+a question the registry predates. `registry.list_prune_runs` and
+`latest_prune_cut` now check for the table and report **no cuts recorded**, which
+is the truth: nothing was cut there, because the command did not exist.
+
+### 15.5 What a cut does, and the one rule that took two attempts
+
+`lele prune plan|apply|runs` (`analysis/retention.py`, schema v19 for
+`prune_runs`). A plan is **pure reads** and runs on a read-only mount; `apply`
+counts through the same `_predicate` the plan counted with, so the approved plan
+and the deleted rows are the same set by construction, and each delete's row count
+is compared with its planned count. The reason is required. Tables removed:
+`move_causes`, `move_events`, `volatility_estimates`, `cause_scans`,
+`price_anomalies`, `price_bars`.
+
+The rule that took two attempts is which instant dates a row. The first version
+dated a bar by its **open**, which meant a bar spanning the cut was counted as
+removed *and* as straddling — the same row on both sides of the report. The rule is
+now uniform: **a row is deleted when the last instant it describes is strictly
+before the cut**, so a move is dated by its end, an estimate by the end of its
+window, a bar by its close and an article by its own instant. A row landing exactly
+on the cut is kept, and every bar that survives therefore lies wholly at or after
+it. A row that straddles is kept and counted in `spans_cut`, because deleting it
+would remove a measurement still mostly inside the retained history and keeping it
+silently would leave a value no longer reproducible from what is left.
+
+Five further things the tests caught rather than the arithmetic, and each of them
+is the species this audit keeps finding: a report that does not say what it did not
+do, or a code path nothing exercised.
+
+- **The canonical-timestamp check read the wrong column.** ISO text with a constant
+  offset and length sorts in the order of the instants it names, so a series is
+  measured before it is cut. The check read `open_time` while the rule dates a bar
+  by `close_time`: a fixture with a UTC close and a `+05:00` open passed the check
+  and would have been counted with the column nobody verified. Both columns are
+  measured now.
+- **The unscoped total was multiplied by the series count.** Counting each
+  non-series-scoped table once per series reports a number several times too large,
+  and it looked exactly like a correct one. The plan reports per-series bar
+  accounting and registry-wide table counts, and a test pins that two series with
+  two moves delete two moves.
+- **A scoped apply deleted the bars and nothing else.** `apply --series K` took its
+  per-series expected counts for the other five tables from the *registry-wide*
+  block, which is the sum over series, so every expected count resolved to zero and
+  the moves, estimates, scans, anomalies and articles of the scoped series stayed
+  where they were while the report said the cut was complete. The three tests that
+  exercised a scoped apply had all asserted on the *other* series surviving, which
+  is what a partial delete passes. The predicate now takes the scope's interval
+  filter and the series' own interval separately — they answer different questions,
+  and conflating them is what hid this — and there is a test that seeds both series
+  with a row in every table and requires one to be emptied and the other untouched.
+- **`price_anomalies` was skipped by a cut that could select it.** The skip is
+  correct for a cut scoped to one *interval*, because the table has no interval
+  column; it was being applied to any cut with a series in hand, so a
+  `--series`-only cut never removed an anomaly and reported zero found. It now
+  skips only for an interval-scoped cut, and a key-scoped cut selects every interval
+  of the instrument and says so in `interval_note`.
+- **An empty registry raised.** `apply` on a registry with no bars reached a
+  re-derivation of the comparison text with nothing to derive it from. There is now
+  a named refusal, `scope_has_no_stored_bars`, for both the scoped and unscoped
+  case.
+
+`move_causes` needed one more thing. Its rows hang off `move_events` by a cascading
+foreign key, so deleting a move removes articles that this module's date filter
+would not have selected — an article dated *after* the cut would have gone while the
+report said nothing was removed. The delete set is therefore the union of the aged
+rows and the attached ones, the breakdown is published (`aged`, `attached`), and
+the row count the database removed is compared with the row count the plan
+counted.
+
+The floor is derived rather than chosen: `moves.MIN_BASELINE_BARS + 2`, the
+smallest number of closes `moves.detect` will accept, and a series whose own
+longest stored window is longer gets a longer floor (a 40-day move on daily bars
+needs 41 bars). A cut leaving fewer is **refused with the series named**, not
+clamped, because a clamp that silently keeps more than was asked for is the report
+that does not say what it did not do.
+
+### 15.6 What the loss is recorded as, and what is never pruned
+
+Every applied cut writes a `prune_runs` row: the instant, the operator's reason, the
+per-table counts deleted, the per-table counts straddling, and what remains per
+series. `registry.stored_bar_span` carries the latest applicable cut into every
+report that measures a series, and `lele explain` states it in the `stored_bars`
+coverage note. The record describes the loss. **It cannot restore it**: a statement
+of how many rows there were is not a copy of them, and the report says so in those
+words.
+
+Five tables are never pruned and the reason is quoted in the report and in the
+generated capability summary, because a table left alone and a table forgotten look
+identical in a file listing: `observations` and `event_store` (filed evidence, not
+measurements of price), `ingest_runs` (deleting the run that fetched a bar would
+leave the bar without a provenance row), `context_measures` (bounded by its parent
+series, not by price history, so a price cut does not bound it — pruning a derived
+row whose parent observation is still stored discards reproducible information and
+saves nothing), and `semantic_embeddings` (derived from text, rebuilt by nothing).
+
+### 15.7 Measured, on a copy of the §12 registry
+
+`lele prune plan --before 2024-01-01 --keep-bars 400` against a copy of the §12
+registry at `/tmp/1a` (3332 Binance daily bars, 2017-08-17 to 2026-10-01, 1169
+tier rows over 628 moves), then applied to that copy:
+
+| table | removed | straddling |
+| --- | --- | --- |
+| `price_bars` | 2326 | 1 |
+| `move_events` | 966 | 0 |
+| `move_causes`, `volatility_estimates`, `cause_scans`, `price_anomalies` | 0 | 0 |
+
+1006 bars remain, the last removed bar opened 2023-12-30, and the 2021 window that
+used to be measurable now reports: *"history before 2024-01-01T00:00:00+00:00 was
+removed by recorded prune run 1 (…), so a window before that instant cannot be
+measured from this registry"*. That sentence is the point of the whole feature:
+without it, an empty window reads as an absence of events.
+
+The research database at `~/.finworld/finworld.db` was not written to, and every
+figure above came from a copy with the outputs left under `/tmp/1a/`.
+
+### 15.8 What this does not establish
+
+- Nothing here decides how much history is worth keeping. The floor is the smallest
+  series that can still be measured; it is not a retention policy.
+- A cut is irreversible from inside this tool. `lele backup` first is advice, not a
+  check: nothing verifies that a backup exists.
+- Pruning changes what a later report can measure and nothing already reported. A
+  figure computed before a cut and one computed after it are two measurements of
+  two inputs.
+- A derived row that survives a cut is kept, and it is no longer reproducible from
+  the remaining bars. `moves.verify_stored` refuses such a row by name when a reader
+  asks, and its count appears there rather than in the prune report.
+- The registry cannot know what it never fetched. A recorded cut tells a reader
+  that history was removed; it says nothing about the period before the first bar a
+  bounded fetch reached, which is why `completeness` stays `unknown`.

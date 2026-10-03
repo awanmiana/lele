@@ -15,10 +15,10 @@ import tempfile
 import traceback
 from urllib.error import URLError
 
-from ..analysis import (causes, comparison, engine, episodes, events, evidence_store, flows,
-                        moves, observations, price_import, projection, prospective, rag,
-                        framework_notes, sanctions, signals, timeline, volatility,
-                        volatility_anomaly, worldstate)
+from ..analysis import (causes, capability, comparison, engine, episodes, events,
+                        evidence_store, flows, moves, observations, price_import, projection,
+                        prospective, rag, framework_notes, retention, sanctions, signals, stationarity,
+                        timeline, volatility, volatility_anomaly, worldstate)
 from ..core import clock, importer, registry
 from ..core import constants
 from ..core.constants import (APP_NAME, APP_VERSION, DB_PATH, FETCH_MAX_LIMIT,
@@ -87,6 +87,8 @@ COMMANDS = {
     "volatility": "Estimate realized volatility of stored history per estimator, with convention",
     "framework": "Cited record of documented allocation frameworks, their evidence and their critiques",
     "causes": "Attribute candidate reasons to stored moves and profile them against controls",
+    "context": "Derive and read stationary quantities from stored context series",
+    "prune": "Plan, apply and list retention cuts on stored price history",
     "scan": "Detect what is happening now with the parameters used for history",
     "sentiment": "Record supplied-text sentiment",
     "relationships": "Show recorded relationships",
@@ -99,6 +101,7 @@ COMMANDS = {
     "observations": "Import normalized decision/flow observations and project them",
     "links": "Record verified website/social links with field-level provenance",
     "export": "Export entity list",
+    "summary": "Write a generated summary of every capability, and print it",
     "menu": "Interactive menu",
 }
 MENU_LABELS = {k: v for k, v in COMMANDS.items() if k != "menu"} | {
@@ -551,18 +554,92 @@ def build_parser():
                               help="Newest servable moves to attribute (default: 10)")
     cause_parser.add_argument("--controls", type=int, default=10, metavar="0..500",
                               help="Non-move control windows to sample; attribute caps at 200, "
-                                   "context accepts up to 500 (default: 10)")
+                                   "context accepts up to 500 (default: 10, which is a quick "
+                                   "look and not a powered comparison: a 10-control run against "
+                                   "hundreds of move windows cannot resolve a small "
+                                   "difference, and control_sampling in the report says how "
+                                   "many were eligible)")
     cause_parser.add_argument("--articles", type=int, default=200, metavar="1..250",
                               help="Maximum articles per provider request (default: 200)")
     cause_parser.add_argument("--news-source", choices=signals.NEWS_PROVIDERS,
                               default=signals.NEWS_PROVIDERS[0],
                               help="Headline provider for attribution (default: gdelt)")
+    cause_parser.add_argument("--measure", action="append", default=[],
+                              choices=list(stationarity.MEASURES),
+                              help="Also compare stored stationary quantities over the same "
+                                   "windows; repeatable. Off by default, because every recorded "
+                                   "figure in this project was produced without it")
     cause_parser.set_defaults(format="json")
     cause_parser.epilog = ("attribute fetches bounded headlines strictly before each stored move, "
         "classifies each into a reason category and records the per-move category set; profile "
         "compares category presence before moves with stride-sampled non-move controls under a "
         "stated permutation null. A category is a keyword match, not a demonstrated cause, and "
-        "moves older than the provider reach are reported unavailable rather than treated as quiet.")
+        "moves older than the provider reach are reported unavailable rather than treated as quiet. "
+        "context reads stored market context; --measure adds a stationary re-expression of each "
+        "stored series, which is the only way a level that drifts with the calendar can be "
+        "compared, and it is a second view of the same windows rather than a second experiment.")
+    context_parser = parsers["context"]
+    context_parser.add_argument("action", choices=("derive", "series", "show"))
+    context_parser.add_argument("kind", nargs="?", default="stablecoin_supply",
+                                choices=sorted(stationarity.LEVEL_SERIES_KINDS),
+                                help="Stored series to read (default: stablecoin_supply)")
+    context_parser.add_argument("--instrument", default="",
+                                help="Instrument key for a series bound to one asset, such as "
+                                     "binance:BTCUSDT; omit for a market-wide series")
+    context_parser.add_argument("--measure", action="append", default=[],
+                                choices=list(stationarity.MEASURES),
+                                help="Measure to derive or compare; repeatable. Default: every "
+                                     "measure")
+    context_parser.add_argument("--baseline", type=int, default=stationarity.MINIMUM_BASELINE,
+                                metavar=f"{stationarity.MINIMUM_BASELINE}..2000",
+                                help=f"Trailing baseline points a z-score is taken against "
+                                     f"(default: {stationarity.MINIMUM_BASELINE}, the minimum "
+                                     f"volatility.z_score already requires)")
+    context_parser.add_argument("--limit", type=int, choices=range(1, 1001), default=50,
+                                metavar="1..1000", help="Stored points to show (default: 50)")
+    context_parser.set_defaults(format="json")
+    context_parser.epilog = ("derive stores a stationary re-expression of a stored context "
+        "series: change is the difference from the previous stored value, zscore is the value "
+        "in units of its own trailing baseline, with the baseline excluding the point scored. "
+        "A level that drifts with the calendar cannot be compared between groups whose windows "
+        "sit at different dates, which is why a measure exists. A difference spanning a hole "
+        "is refused rather than computed. rate and ratio are not offered and "
+        "`context series` states why. A derived quantity is not a new reading and is not a "
+        "cause of a move. Deriving twice over unchanged stored rows rewrites the same rows.")
+    prune_parser = parsers["prune"]
+    prune_parser.add_argument("action", choices=("plan", "apply", "runs"))
+    prune_parser.add_argument("--before", dest="cut", type=_instant, metavar="ISO",
+                              help="Aware ISO8601 instant; rows describing an earlier instant are "
+                                   "removed and a row landing exactly on it is kept")
+    prune_parser.add_argument("--series", dest="instrument_key", default="",
+                              help="Restrict the cut to one instrument key, such as "
+                                   "binance:BTCUSDT; omit to cut every stored series")
+    prune_parser.add_argument("--interval", choices=tuple(history.INTERVALS), default="",
+                              help="Restrict the cut to one interval (default: every interval)")
+    prune_parser.add_argument("--keep-bars", type=int, default=retention.DEFAULT_KEEP_BARS,
+                              metavar=f"N>={retention.KEEP_BARS_FLOOR}",
+                              help=f"Bars left on each series (default: "
+                                   f"{retention.DEFAULT_KEEP_BARS}, the smallest number the "
+                                   "move detector will still measure; a smaller value is "
+                                   "refused rather than quietly raised)")
+    prune_parser.add_argument("--reason", default="",
+                              help="Why the history is being removed; required by apply, because "
+                                   "this deletes measurements with their source and retrieval "
+                                   "time attached")
+    prune_parser.add_argument("--limit", type=int, choices=range(1, 1001), default=50,
+                              metavar="1..1000", help="Recorded cuts to list (default: 50)")
+    prune_parser.set_defaults(format="json")
+    prune_parser.epilog = ("plan counts and writes nothing; apply deletes exactly what the plan "
+        "counted and records the cut as a prune run. Both remove price history before the cut and "
+        "the derived rows whose own window ended before it: move_events, move_causes, "
+        "volatility_estimates, cause_scans and price_anomalies. A bar, move or estimate that "
+        "straddles the cut is kept and reported as straddling, because deleting it would remove a "
+        "measurement still mostly inside the retained history and keeping it silently would leave "
+        "a value that can no longer be reproduced. A cut that would leave a series shorter than "
+        "the detector can measure is refused with the series named. Filed observations, ingest "
+        "runs, evidence events and context measures are never pruned and the report says why. The "
+        "record of a cut states how many rows went, not what they contained: only a backup holds "
+        "them.")
     scan_parser = parsers["scan"]
     scan_parser.add_argument("id", type=_eid, metavar="ID")
     scan_parser.add_argument("--interval", choices=tuple(history.INTERVALS), default="1d")
@@ -939,6 +1016,24 @@ def build_parser():
     export.add_argument("--force", action="store_true", help="Atomically replace an existing file")
     _filters(export)
     export.epilog = "Exports flat entity rows, not an importer backup. CSV formula-like cells are prefixed with an apostrophe."
+    summary = parsers["summary"]
+    summary.add_argument("--output", type=_path, default="lele-summary.md", metavar="PATH",
+                         help="Destination file in an existing parent directory (default: lele-summary.md)")
+    summary.add_argument("--format", choices=("markdown", "json"), default="markdown",
+                         help="Rendered document format; the JSON form carries the same data (default: markdown)")
+    summary.add_argument("--force", action="store_true", help="Atomically replace an existing file")
+    summary.add_argument("--quiet", action="store_true",
+                         help="Write the file and print only its path, not the document")
+    summary.set_defaults(format="markdown")
+    summary.epilog = (
+        "Builds a capability inventory from the program itself: every command with its "
+        "syntax, every public source with its own coverage limit, the observation taxonomy, "
+        "the volatility estimators, the frozen indicator and forecast methods, the cited "
+        "allocation frameworks, the standing objective, and what the project declines to do. "
+        "It prints the document and writes it to --output. The file is refused without "
+        "--force if it exists and may not be the registry or its journal files. The "
+        "inventory says what the program can attempt; it is not evidence that anything is "
+        "correct and makes no coverage claim.")
     parsers["menu"].epilog = "Choose a number or command; supply arguments using CLI quoting. No shell is executed. Use back or quit at any prompt."
     return parser
 
@@ -1050,6 +1145,85 @@ def _export(rows, args):
         if temporary is not None:
             temporary.unlink(missing_ok=True)
     return {"exported": len(rows), "format": args.format, "output": args.output}
+
+
+def _summary(args, parser):
+    """Write and print the generated capability inventory.
+
+    The report is built from the program rather than from prose, so a capability
+    added or removed shows up here without anyone updating a document. Opening
+    the registry is optional: the vocabulary and the command table exist without
+    a database, and an absent registry is reported as absent rather than as a set
+    of zeros, so a fresh install and an empty registry are not the same claim.
+    """
+    if not isinstance(args.output, str) or not args.output.strip() or len(args.output) > 4096 \
+            or "\x00" in args.output:
+        raise CLIError("summary output must be a nonempty path without NUL", 2)
+    subparsers = parser._subparsers._group_actions[0].choices
+    def build(conn):
+        return capability.build(
+            conn, labels=COMMANDS, read_only=READ_ONLY_COMMANDS,
+            read_only_actions=READ_ONLY_ACTIONS, no_registry=NEVER_OPENS_REGISTRY,
+            usage_for=lambda name: capability.usage_for(subparsers[name]))
+    report = build(None)
+    if os.path.isfile(args.db):
+        with closing(registry.read_connect(args.db)) as conn:
+            report = build(conn)
+    text = capability.render(report, args.format)
+    _protect_database(args)
+    path = _write_document(text, args)
+    if not args.quiet:
+        print(text, end="" if text.endswith("\n") else "\n")
+    return {"method": report["method"], "output": str(path), "format": args.format,
+            "output_bytes": len(text.encode("utf-8")),
+            "output_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "printed": not args.quiet, "commands": report["counts"]["commands"],
+            "registry_sources": report["counts"]["registry_sources"],
+            "allowlisted_endpoints": report["counts"]["allowlisted_endpoints"],
+            "registry_state": report["registry"]["status"],
+            "completeness": "unknown",
+            "completeness_note": "this file inventories what the program can attempt; it is "
+                                 "not evidence of correctness and not a coverage claim"}
+
+
+def _write_document(text, args):
+    """Write the rendered document atomically, refusing to clobber by accident.
+
+    The same guarantees the export and backup paths make: the parent must exist,
+    an existing file is refused without --force, and the replacement is a rename
+    rather than a truncate in place, so an interrupted run cannot leave a
+    half-written document where a readable one was.
+    """
+    output = Path(args.output).absolute()
+    if not output.parent.is_dir():
+        raise CLIError("summary parent directory must already exist")
+    if output.is_dir():
+        raise CLIError("summary output must be a file")
+    if os.path.lexists(output) and not args.force:
+        raise CLIError("summary output already exists; use --force to replace it")
+    if not args.force and not hasattr(os, "link"):
+        raise CLIError("atomic no-overwrite summary is unavailable on this runtime; "
+                       "use a Python runtime with os.link support")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="",
+                                         dir=output.parent, prefix=".lele-summary-",
+                                         delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if args.force:
+            os.replace(temporary, output)
+        else:
+            try:
+                os.link(temporary, output)
+            except FileExistsError:
+                raise CLIError("summary output already exists; use --force to replace it") from None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return output
 
 
 def _protect_database(args):
@@ -1246,6 +1420,10 @@ def _validate_volatility(args):
 
 def _validate_causes(args):
     interval_seconds = history.INTERVALS[args.interval]
+    if args.measure and args.action != "context":
+        raise CLIError(
+            "--measure compares stored stationary quantities and is only available to "
+            "`causes context`; on attribute or profile it would be accepted and ignored", 2)
     if args.action == "context":
         try:
             causes.validate_profile(interval_seconds=interval_seconds,
@@ -1278,6 +1456,62 @@ def _validate_causes(args):
         raise CLIError(str(exc), 2) from exc
 
 
+def _validate_context(args):
+    try:
+        if not 1 <= args.baseline <= 2000:
+            raise ValueError("baseline must be an integer from 1 to 2000")
+        for measure in (args.measure or ["change"]):
+            stationarity.validate(measure, args.kind, args.baseline)
+    except ValueError as exc:
+        raise CLIError(str(exc), 2) from exc
+
+
+def _derive_context(conn, args):
+    """Derive each requested measure of one stored series and store the result."""
+    measures = tuple(args.measure) or stationarity.MEASURES
+    moment = clock.now()
+    series, total = [], 0
+    refused: dict = {}
+    for measure in measures:
+        derived = stationarity.derive(conn, args.kind, instrument_key=args.instrument,
+                                      measure=measure, baseline=args.baseline, now=moment)
+        written = stationarity.store(conn, derived)
+        series.append({key: value for key, value in derived.items() if key != "rows"})
+        series[-1]["written"] = written["written"]
+        total += written["written"]
+        for name, count in derived["refused"].items():
+            refused[name] = refused.get(name, 0) + count
+    return {"method": stationarity.METHOD, "action": "derive", "kind": args.kind,
+            "instrument_key": args.instrument, "measures": list(measures),
+            "baseline": args.baseline, "series": series, "written": total,
+            "refused": dict(sorted(refused.items())),
+            "derived_at": moment.isoformat(),
+            "note": "a derived quantity is a re-expression of stored observations, not a new "
+                    "reading. Deriving again over unchanged stored rows rewrites the same rows "
+                    "and changes no count, which is what makes the stored value reproducible.",
+            "limitations": list(stationarity.LIMITATIONS)}
+
+
+def _validate_prune(args):
+    """Refuse an unusable cut before a connection is opened."""
+    if args.action == "runs":
+        if args.cut:
+            raise CLIError("`prune runs` lists recorded cuts and takes no --before", 2)
+        return
+    if not args.cut:
+        raise CLIError(f"`prune {args.action}` needs --before, an aware ISO8601 instant", 2)
+    if args.keep_bars < retention.KEEP_BARS_FLOOR:
+        raise CLIError(
+            f"--keep-bars must be at least {retention.KEEP_BARS_FLOOR}, the smallest number of "
+            "bars the move detector will still measure; a smaller series cannot be detected, so "
+            "the floor is raised rather than honoured", 2)
+    if args.action == "apply" and not args.reason.strip():
+        raise CLIError(
+            "`prune apply` needs --reason. It deletes stored measurements with their source and "
+            "retrieval time attached, and nothing in this registry is removed without a stated "
+            "reason. Run `lele prune plan` first to see the counts.", 2)
+
+
 def _validate_scan(args):
     try:
         signals.validate(tuple(args.horizons), tuple(args.channels), args.topic, None,
@@ -1305,6 +1539,14 @@ def _directions(args):
     return ("all",) if args.direction == "all" else (args.direction,)
 
 
+#: Commands whose read-only behaviour depends on the action. Every entry must be
+#: live: the command has an `action` argument and the named values are among its
+#: choices. An entry that names an action the parser does not have is a claim the
+#: code does not support -- it never fires, so it looks harmless while quietly
+#: asserting a read-only guarantee, and `store-evidence` already had one that
+#: would have made a writing command read-only the day it grew an action.
+#: `tests/test_db_guarantees.py` fails if an entry goes stale or overlaps
+#: `READ_ONLY_COMMANDS`.
 READ_ONLY_ACTIONS = {
     "links": frozenset({"list"}),
     "flows": frozenset({"list", "summary"}),
@@ -1313,20 +1555,25 @@ READ_ONLY_ACTIONS = {
     "resolve": frozenset({"candidates", "list"}),
     "rag": frozenset({"build-graph", "indicator"}),
     "indicators": frozenset({"list", "spec", "project"}),
-    "explain": frozenset({"all"}),
-    "capital": frozenset({"all"}),
-    "store-evidence": frozenset({"all"}),
     "prospective": frozenset({"score"}),
     "causes": frozenset({"profile", "context"}),
     "instruments": frozenset({"list", "show"}),
+    "context": frozenset({"series", "show"}),
+    "prune": frozenset({"plan", "runs"}),
 }
 
 READ_ONLY_COMMANDS = frozenset({
     "list", "show", "stats", "countries", "runs", "tree", "relationships", "analyze",
     "finmap", "events", "project", "export", "doctor", "sources", "kinds",
     "worldstate", "compare", "episodes", "volatility-analyze",
-    "explain", "capital",
+    "explain", "capital", "summary",
 })
+
+#: Commands that never open the registry at all, so there is nothing to classify
+#: as read-only or writing. Stated here rather than only in a test because the
+#: generated capability summary has to say something true about them: a command
+#: that returns a constant cannot honestly be labelled "may write".
+NEVER_OPENS_REGISTRY = frozenset({"version", "menu", "framework"})
 
 
 def _read_only(command, args):
@@ -1399,7 +1646,7 @@ def command_entity_missing(conn, entity_id) -> bool:
     return registry.get_entity(conn, entity_id) is None
 
 
-def _dispatch(args):
+def _dispatch(args, parser=None):
     command = args.command
     if command == "version":
         return {"name": APP_NAME, "version": APP_VERSION, "logo": constants.LOGO,
@@ -1603,7 +1850,8 @@ def _dispatch(args):
                     conn, entity["key"], interval_seconds, args.move_hours, args.pre_hours,
                     causes.PERMUTATIONS,
                     None if args.tier == "all" else args.tier,
-                    None if args.direction == "all" else args.direction, args.controls)
+                    None if args.direction == "all" else args.direction, args.controls,
+                    measure=tuple(args.measure))
             if args.action == "attribute":
                 return causes.attribute(
                     conn, args.id, entity["key"], interval_seconds, args.move_hours,
@@ -1614,6 +1862,46 @@ def _dispatch(args):
                                   args.pre_hours, causes.PERMUTATIONS,
                                   None if args.tier == "all" else args.tier,
                                   None if args.direction == "all" else args.direction)
+    if command == "context":
+        _validate_context(args)
+        if args.action == "derive":
+            with registry.get_conn(args.db) as conn:
+                return _derive_context(conn, args)
+        with registry.get_read_conn(args.db) as conn:
+            if args.action == "series":
+                return stationarity.report(
+                    conn, args.kind, instrument_key=args.instrument,
+                    measure=args.measure[0] if args.measure else "",
+                    baseline=args.baseline, now=clock.now())
+            rows = registry.list_context_measures(
+                conn, args.kind, instrument_key=args.instrument,
+                measure=args.measure[0] if args.measure else "",
+                limit=args.limit, order="desc")
+            return {"method": stationarity.METHOD, "kind": args.kind,
+                    "instrument_key": args.instrument,
+                    "measure": args.measure[0] if args.measure else "every",
+                    "rows": len(rows), "observations": rows,
+                    "series": registry.context_measure_series(conn),
+                    "note": "derived quantities, re-expressions of stored observations; a stored "
+                            "measure is not a new reading and not a cause of anything",
+                    "limitations": list(stationarity.LIMITATIONS)}
+    if command == "prune":
+        _validate_prune(args)
+        if args.action == "runs":
+            with registry.get_read_conn(args.db) as conn:
+                return retention.history(conn, limit=args.limit)
+        if args.action == "plan":
+            with registry.get_read_conn(args.db) as conn:
+                return retention.plan(
+                    conn, args.cut, keep_bars=args.keep_bars,
+                    instrument_key=args.instrument_key,
+                    interval_seconds=history.INTERVALS[args.interval] if args.interval else 0,
+                    reason=args.reason)
+        with registry.get_conn(args.db) as conn:
+            return retention.apply(
+                conn, args.cut, reason=args.reason, keep_bars=args.keep_bars,
+                instrument_key=args.instrument_key,
+                interval_seconds=history.INTERVALS[args.interval] if args.interval else 0)
     if command == "scan":
         _validate_scan(args)
         with (registry.get_read_conn(args.db) if args.no_store
@@ -1759,6 +2047,8 @@ def _dispatch(args):
             raise CLIError(str(exc), 1) from exc
     if command == "doctor":
         return registry.health_check(args.db)
+    if command == "summary":
+        return _summary(args, parser if parser is not None else build_parser())
     if command == "init":
         registry.init_db(args.db)
         return {"initialized": True}
@@ -2051,7 +2341,7 @@ def main(argv=None):
             return 0
         if args.command == "menu":
             return _menu(args, parser)
-        result = _dispatch(args)
+        result = _dispatch(args, parser)
         if result is not None:
             _emit(result, args)
         return 0

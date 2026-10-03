@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 
 from ..core import registry
-from . import signals
+from . import moves, signals
 
 METHOD = "window_explain_v1"
 MIN_INTERVAL_SECONDS = 60
@@ -304,6 +304,7 @@ def explain(conn, entity_id: int, start: str, end: str, *, interval_seconds: int
     move_rows = registry.list_move_events(conn, key, interval_seconds, move_hours,
                                           start=read_start, end=window_end.isoformat(),
                                           limit=MAX_LIMIT)
+    move_rows, unverified_moves = moves.verify_stored(conn, key, interval_seconds, move_rows)
     tiers: dict = {}
     for row in move_rows:
         if not (pre_start <= _time(row["end_time"]) < window_end):
@@ -369,6 +370,13 @@ def explain(conn, entity_id: int, start: str, end: str, *, interval_seconds: int
         "episodes": legs,
         "moves": {"by_tier": [tiers[name] for name in sorted(tiers, key=_tier_sort)],
                   "total_rows": len(move_rows),
+                  "unverified_rows": len(unverified_moves),
+                  "unverified_sample": unverified_moves[:20],
+                  "unverified_note": "a stored move whose window spans a missing bar or does "
+                                     "not cover the recorded move length is not counted here; "
+                                     "the detector that wrote it may predate the contiguity "
+                                     "check, so its window is not the length it is labelled "
+                                     "with",
                   "note": "tiers are cumulative: a move is recorded at every threshold it "
                           "clears, so the counts are nested, not independent"},
         "volatility_instances": volatility,
@@ -452,6 +460,15 @@ def _channel_coverage(span, bars, behaviour, tiers, volatility, anomalies, insid
     if span.get("bars") and not span.get("usable"):
         span_note = (f"stored history has {span['gaps']} gap(s), largest "
                      f"{span['largest_gap_seconds']}s; a window spanning one is not measured")
+    removed_before = span.get("history_removed_before")
+    if removed_before:
+        # "Nothing stored" and "nothing happened" are different claims, and a
+        # recorded cut is the difference between them: before this instant the
+        # history was removed on purpose, which is not the same as never fetched.
+        span_note = (f"{span_note}; " if span_note else "") + (
+            f"history before {removed_before} was removed by recorded prune run "
+            f"{span['history_removed_run_id']} ({span['history_removed_reason']}), so a window "
+            "before that instant cannot be measured from this registry")
     channels = [
         entry("stored_bars", bool(span.get("bars")), span.get("bars", 0), span_note),
         entry("detected_moves", bool(tiers), sum(item["count"] for item in tiers.values())),

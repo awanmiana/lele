@@ -27,7 +27,7 @@ from decimal import Decimal, InvalidOperation, localcontext
 
 from ..core import registry
 from ..fetchers import news, news_rss
-from . import moves
+from . import moves, stationarity
 
 METHOD = "news_cause_profile_v1"
 PROVIDER_WINDOW_HOURS = 24 * 90
@@ -297,6 +297,11 @@ def _control_windows(bars, move_windows, pre_hours, count, instrument_key, inter
     `count`. Stopping at the first `count` candidates would place every control
     in the oldest part of the series, which silently removes the most recent
     period from the comparison.
+
+    Returns the chosen windows and how many timestamps were eligible before
+    thinning, because a control group of ten read against five hundred move
+    windows looks like a finding about the market and is really a statement
+    about the sample that was requested.
     """
     starts = [datetime.fromisoformat(bar["open_time"]) for bar in bars]
     blocked = [(datetime.fromisoformat(row["start_time"]) - timedelta(hours=pre_hours),
@@ -310,7 +315,7 @@ def _control_windows(bars, move_windows, pre_hours, count, instrument_key, inter
             continue
         eligible.append(start)
     if not eligible or count <= 0:
-        return []
+        return [], len(eligible)
     if len(eligible) <= count:
         chosen = eligible
     else:
@@ -320,7 +325,7 @@ def _control_windows(bars, move_windows, pre_hours, count, instrument_key, inter
     return [{"key": f"{instrument_key}|{interval_seconds}|"
                      f"{(start - window).isoformat()}",
              "start_inclusive": (start - window).isoformat(),
-             "end_exclusive": start.isoformat()} for start in chosen]
+             "end_exclusive": start.isoformat()} for start in chosen], len(eligible)
 
 
 def attribute(conn, entity_id, instrument_key, interval_seconds, move_hours=24,
@@ -356,6 +361,7 @@ def attribute(conn, entity_id, instrument_key, interval_seconds, move_hours=24,
                                "change_percent": row["change_percent"],
                                "reason": "pre-move window predates the selected provider's "
                                          "reach"})
+    selected, unverified = moves.verify_stored(conn, instrument_key, interval_seconds, selected)
     report = {
         "method": METHOD, "instrument_key": instrument_key,
         "parameters": {"interval_seconds": interval_seconds, "move_hours": move_hours,
@@ -367,6 +373,12 @@ def attribute(conn, entity_id, instrument_key, interval_seconds, move_hours=24,
                        "news_provider": news_provider},
         "coverage": {"status": "ok", "moves_available": len(selected),
                      "moves_attributed": 0, "moves_unavailable": 0,
+                     "moves_unverified": len(unverified),
+                     "unverified_windows": unverified[:20],
+                     "unverified_note": "a stored move whose window spans a missing bar or "
+                                        "does not cover the recorded move length was not "
+                                        "attributed; the headline set would describe a window "
+                                        "the detector would refuse",
                      "cause_status_note": "provider_unavailable means the window was not read, "
                                           "so it is never counted as a move without a reason",
                      "controls_requested": controls, "controls_attributed": 0,
@@ -398,8 +410,9 @@ def attribute(conn, entity_id, instrument_key, interval_seconds, move_hours=24,
         report["coverage"]["unavailable_moves"] = unavailable[:20]
         return report
     bars = registry.list_price_bars(conn, instrument_key, interval_seconds, limit=20000)
-    control_windows = _control_windows(bars, selected, pre_hours, controls, instrument_key,
-                                        interval_seconds, floor)
+    control_windows, eligible_controls = _control_windows(
+        bars, selected, pre_hours, controls, instrument_key, interval_seconds, floor)
+    report["coverage"]["controls_eligible"] = eligible_controls
     if not selected and not control_windows:
         report["coverage"]["status"] = "no_servable_window"
         return report
@@ -574,6 +587,7 @@ def profile(conn, instrument_key, interval_seconds, move_hours=24, pre_hours=24,
                      direction=direction)
     rows = registry.list_move_events(conn, instrument_key, interval_seconds, move_hours,
                                      limit=moves.MAX_MOVES)
+    rows, unverified = moves.verify_stored(conn, instrument_key, interval_seconds, rows)
     if tier:
         rows = [row for row in rows if row["tier"] == tier]
     if direction:
@@ -622,6 +636,8 @@ def profile(conn, instrument_key, interval_seconds, move_hours=24, pre_hours=24,
         "interval_seconds": interval_seconds, "move_hours": move_hours,
         "pre_hours": pre_hours, "tier": tier, "direction": direction,
         "move_windows": len(move_windows), "control_windows": len(control_windows),
+        "unverified_move_windows": len(unverified),
+        "unverified_sample": unverified[:20],
         "permutation_null": "per-window flags are exchangeable between moves and controls",
         "permutations": permutations, "permutation_seed": PERMUTATION_SEED,
         "categories": observed,
@@ -639,11 +655,18 @@ def profile(conn, instrument_key, interval_seconds, move_hours=24, pre_hours=24,
         "limitations": [
             "Presence is per window, so one article carrying three terms counts once per "
             "category and a headline can raise several candidate reasons at once.",
+            "A stored move whose window spans a missing bar or does not cover the recorded "
+            "move length is left out, because the detector that wrote it may predate the "
+            "contiguity check; the count of those is reported as unverified_move_windows.",
             "Move windows are the largest non-overlapping moves, so this profile describes those "
             "moves and not the full distribution of moves.",
             "Control windows are stride-sampled non-move periods and are not matched on "
             "volatility, volume, hour of day or news density, so a difference mixes cause with "
             "selection.",
+            "The number of control windows is a requested sample, not a property of the stored "
+            "data: control_sampling reports how many eligible non-move timestamps existed "
+            "before thinning, and a move group many times larger than the control group "
+            "limits what the permutation test can resolve regardless of the p-value.",
             "A keyword lexicon is fixed and English-only; categories it omits are invisible here.",
             "The permutation null assumes exchangeable windows; serially adjacent windows and a "
             "single news burst violate that, so p-values are optimistic.",
@@ -835,7 +858,7 @@ def _kind_coverage(conn, instrument_key, window_seconds):
 
 
 def _context_windows(conn, instrument_key, interval_seconds, move_hours, pre_hours, tier,
-                     direction, controls):
+                     direction, controls, measure_points=None):
     """Move and control windows for the stored-context profile.
 
     Unlike the headline profile this needs no provider, so it can reach as far
@@ -844,10 +867,17 @@ def _context_windows(conn, instrument_key, interval_seconds, move_hours, pre_hou
     applied identically to moves and controls. Applying it to moves alone would
     make every kind look enriched, because an older control window that predates
     a series would contribute a guaranteed absence.
+
+    Each window also carries `measure_values`: the stored stationary quantity per
+    measure series, when one was requested. It is read from the same windows under
+    the same availability rule as the levels, so the two comparisons are drawn
+    from the same places or not at all.
     """
     from . import signals
+    measure_points = measure_points or {}
     rows = registry.list_move_events(conn, instrument_key, interval_seconds, move_hours,
                                      limit=moves.MAX_MOVES)
+    rows, unverified = moves.verify_stored(conn, instrument_key, interval_seconds, rows)
     if tier:
         rows = [row for row in rows if row["tier"] == tier]
     if direction:
@@ -855,10 +885,15 @@ def _context_windows(conn, instrument_key, interval_seconds, move_hours, pre_hou
     window_seconds = timedelta(hours=pre_hours)
     coverage = _kind_coverage(conn, instrument_key, window_seconds)
     if not coverage:
-        return [], [], [{"reason": "no stored observation covers a window of this length"}], {}
+        return [], [], [{"reason": "no stored observation covers a window of this length"}], {}, {}
     floor = min(span[0] for span in coverage.values())
     ceiling = max(span[1] for span in coverage.values())
     move_windows, uncovered = [], []
+    if unverified:
+        uncovered.append({"reason": "stored move windows the current detector would refuse: "
+                                    + "; ".join(sorted({item["reason"] for item in unverified})),
+                          "count": len(unverified),
+                          "move_event_ids": [item["move_event_id"] for item in unverified[:20]]})
     for row in rows:
         boundary = datetime.fromisoformat(row["start_time"]).astimezone(UTC)
         start = boundary - window_seconds
@@ -867,6 +902,7 @@ def _context_windows(conn, instrument_key, interval_seconds, move_hours, pre_hou
         found, _ = signals.stored(conn, instrument_key, start, boundary)
         if not found:
             continue
+        measured = _measure_values(measure_points, start, boundary)
         move_windows.append({"key": str(row["id"]), "tier": row["tier"],
                              "direction": row["direction"], "start_time": row["start_time"],
                              "end_time": boundary.isoformat(),
@@ -874,15 +910,17 @@ def _context_windows(conn, instrument_key, interval_seconds, move_hours, pre_hou
                              "categories": {item["kind"] for item in found},
                              "families": {item["family"] for item in found},
                              "values": _values(found),
+                             "measure_values": measured[0],
+                             "measure_values_withheld": measured[1],
                              "signals": len(found)})
     uncovered.append({"reason": "moves with no stored observation in the pre-move window",
                       "count": len(rows) - len(move_windows)})
     bars = registry.list_price_bars(conn, instrument_key, interval_seconds, limit=20000)
     bars = [bar for bar in bars
             if floor <= datetime.fromisoformat(bar["open_time"]) <= ceiling]
-    windows = _control_windows(bars, rows, pre_hours,
-                               controls if controls is not None else max(40, 2 * len(move_windows)),
-                               instrument_key, interval_seconds, floor)
+    requested = (controls if controls is not None else max(40, 2 * len(move_windows)))
+    windows, eligible = _control_windows(bars, rows, pre_hours, requested,
+                                         instrument_key, interval_seconds, floor)
     control_rows, control_uncovered = [], 0
     for window in windows:
         start = datetime.fromisoformat(window["start_inclusive"])
@@ -891,16 +929,163 @@ def _context_windows(conn, instrument_key, interval_seconds, move_hours, pre_hou
         if not found:
             control_uncovered += 1
             continue
+        measured = _measure_values(measure_points, start, end)
         control_rows.append({"key": window["key"], "start_time": start.isoformat(),
                              "end_time": end.isoformat(),
                              "categories": {item["kind"] for item in found},
                              "families": {item["family"] for item in found},
                              "values": _values(found),
+                             "measure_values": measured[0],
+                             "measure_values_withheld": measured[1],
                              "signals": len(found)})
     if control_uncovered:
         uncovered.append({"reason": "control windows without stored coverage",
                           "count": control_uncovered})
-    return move_windows, control_rows, uncovered, coverage
+    sampling = {"requested": requested, "eligible": eligible,
+                "used": len(control_rows), "dropped_without_coverage": control_uncovered,
+                "move_to_control_ratio": (round(len(move_windows) / len(control_rows), 2)
+                                          if control_rows else None),
+                "note": "eligible is how many non-move timestamps existed inside the period "
+                        "before thinning; a small used count against a large eligible count "
+"means the comparison's power was set by the requested sample, not "
+                "by the stored data"}
+    return move_windows, control_rows, uncovered, coverage, sampling
+
+
+def validate_measures(measures):
+    """The measure names to compare, as a validated set."""
+    if measures is None or measures == ():
+        return frozenset()
+    if isinstance(measures, str):
+        raise ValueError("measure must be a sequence of measure names, not one string")
+    if not isinstance(measures, (tuple, list, set, frozenset)):
+        raise ValueError("measure must be a sequence of measure names")
+    unknown = sorted(set(measures) - set(stationarity.MEASURES))
+    if unknown:
+        raise ValueError(f"measure must be one of {', '.join(stationarity.MEASURES)}; "
+                         f"not {', '.join(unknown)}")
+    return frozenset(measures)
+
+
+def _measure_series(conn, instrument_key, measures):
+    """The stored measure series to compare, read once, with what was skipped.
+
+    A measure series is only read when the instrument is the one it is bound to,
+    or when it is a market-wide series. A series carrying more than one baseline
+    length is skipped with that stated, because choosing between a 60-point and a
+    120-point z-score silently would be picking a number to report rather than
+    measuring one.
+    """
+    if not measures:
+        return {}, []
+    in_use = stationarity.baselines_in_use(conn)
+    wanted = set(measures)
+    points: dict = {}
+    notes = []
+    for (kind, scope, measure), baselines in sorted(in_use.items()):
+        if measure not in wanted:
+            continue
+        if scope and scope != instrument_key:
+            continue
+        label = stationarity.series_label(kind, scope, measure)
+        if len(baselines) > 1:
+            notes.append({"series": label, "status": "not_compared", "baselines": baselines,
+                          "reason": "this series is stored against more than one baseline length, "
+                                    "so the quantity is not one number; pass --baseline to state "
+                                    "which, or re-derive with a single baseline"})
+            continue
+        stored = stationarity.stored_points(conn, kind, measure, scope)
+        if not stored:
+            notes.append({"series": label, "status": "not_compared", "baselines": baselines,
+                          "reason": "the series is registered but holds no stored points"})
+            continue
+        points[label] = {"kind": kind, "instrument_key": scope, "measure": measure,
+                         "baselines": baselines, "points": stored,
+                         "unit": next((item["unit"] for item in stored if item["unit"]), ""),
+                         "count": len(stored)}
+    for measure in sorted(wanted):
+        if (not any(key.endswith("." + measure) for key in points)
+                and not any(item["series"].endswith("." + measure) for item in notes)):
+            notes.append({"series": f"*.{measure}", "status": "not_compared",
+                          "baselines": [], "reason":
+                              "no stored measure of this kind exists for this instrument or "
+                              "for the market; run `lele context derive` first"})
+    return points, notes
+
+
+def _measure_values(measure_points, start, end):
+    """Mean stored measure per series in one window, and how many points were withheld."""
+    values, withheld = {}, 0
+    for label, series in measure_points.items():
+        value, excluded = stationarity.window_value(series["points"], start, end)
+        withheld += excluded
+        if value is not None:
+            values[label] = value
+    return values, withheld
+
+
+def _measure_window(window):
+    """One window read as measure series rather than as stored kinds.
+
+    Shaped so `_contrast` and `_time_trend` are used unchanged: the measure label
+    takes the place of the kind in both the presence set and the measured values,
+    which is what makes the stationary comparison the same test as the level one
+    rather than a second, looser one.
+    """
+    return {"key": window["key"], "tier": window.get("tier"),
+            "direction": window.get("direction"),
+            "start_time": window["start_time"], "end_time": window["end_time"],
+            "categories": set(window["measure_values"]),
+            "families": set(), "values": dict(window["measure_values"]),
+            "measure_values_withheld": window["measure_values_withheld"],
+            "signals": len(window["measure_values"])}
+
+
+def _measure_section(move_windows, control_windows, coverage, measures, notes,
+                     move_count, control_count, contrast=None):
+    """The stationary comparison, reported beside the level one it replaces.
+
+    It carries the same multiple-testing correction and the same drift check, so
+    a measure that is stationary can still be reported as confounded if it is not,
+    and a measure can still fail to survive the correction. A measure section that
+    could only produce a finding would be a licence to publish one.
+    """
+    names = sorted({item for window in move_windows + control_windows
+                    for item in window["categories"]})
+    results = contrast(names) if contrast is not None else []
+    withheld = sum(int(window.get("measure_values_withheld", 0))
+                   for window in move_windows + control_windows)
+    return {
+        "method": "stored_context_measure_profile_v1",
+        "measures_requested": sorted(measures),
+        "measures_off": dict(sorted(stationarity.NOT_OFFERED.items())),
+        "series": results,
+        "series_tested": len(results),
+        "not_compared": notes,
+        "coverage_days": {label: round((span[1] - span[0]).total_seconds() / 86400, 1)
+                          for label, span in sorted(coverage.items()) if span},
+        "move_windows": move_count, "control_windows": control_count,
+        "points_withheld_as_later_than_window": withheld,
+        "withheld_note": "a measure point inside a window by observation but recorded as "
+                         "available after the window closed is newer than that window and is "
+                         "left out, so it cannot enter an earlier comparison",
+        "inference_status": _inference_status(move_count, control_count,
+                                              [item["adjusted_magnitude_p"] for item in results
+                                               if item["significant_after_correction"]], ALPHA),
+        "multiple_testing": {
+            "series_tested": len(results),
+            "method": "Benjamini-Hochberg step-up on the permutation p-values",
+            "alpha": ALPHA,
+            "note": "the family corrected here is the measure series only. The level and measure "
+                    "comparisons are two views of the same windows, so quoting a value from "
+                    "whichever one clears the correction is selecting on the outcome",
+        },
+        "what_this_is": "the same move and control windows as the kinds and families above, "
+                        "read through a stationary re-expression of each stored series. It "
+                        "answers the same question with the calendar trend removed. It does "
+                        "not make any recorded condition a cause of a move.",
+        "limitations": list(stationarity.LIMITATIONS),
+    }
 
 
 def _values(found):
@@ -1009,7 +1194,8 @@ def _contrast(observed, move_windows, control_windows, field, permutations, gene
 
 
 def profile_context(conn, instrument_key, interval_seconds, move_hours=24, pre_hours=24,
-                    permutations=PERMUTATIONS, tier=None, direction=None, controls=None):
+                    permutations=PERMUTATIONS, tier=None, direction=None, controls=None,
+                    measure=()):
     """Profile stored market context before moves against control windows.
 
     The headline profile answers "which story types preceded a move". This one
@@ -1017,19 +1203,31 @@ def profile_context(conn, instrument_key, interval_seconds, move_hours=24, pre_h
     actions, sentiment readings and macro releases that a wired source already
     stored. It needs no news provider, so it is not limited by provider reach,
     and a missing condition is a missing record rather than a quiet news day.
+
+    `measure` names stored stationary quantities to compare as well, and it is
+    off unless asked for. It is off because the level comparison is what every
+    recorded figure was produced from: adding a section silently would restate
+    those results under a heading that makes them look cleaner than they are.
+    The measure section answers the same question about the same windows using
+    the same permutation test, and reports its own coverage, because a series
+    that is stationary still needs to reach the windows it is compared in.
     """
     validate_profile(interval_seconds=interval_seconds, move_hours=move_hours,
                      pre_hours=pre_hours, permutations=permutations, tier=tier,
                      direction=direction)
-    move_windows, control_windows, uncovered, coverage = _context_windows(
+    validate_measures(measure)
+    measure_points, measure_notes = _measure_series(conn, instrument_key, measure)
+    move_windows, control_windows, uncovered, coverage, sampling = _context_windows(
         conn, instrument_key, interval_seconds, move_hours, pre_hours, tier, direction,
-        controls)
+        controls, measure_points)
     base = {
         "method": "stored_context_profile_v1", "instrument_key": instrument_key,
         "interval_seconds": interval_seconds, "move_hours": move_hours,
         "pre_hours": pre_hours, "tier": tier, "direction": direction,
         "move_windows": len(move_windows), "control_windows": len(control_windows),
-        "uncovered_moves": len(uncovered),
+        "control_sampling": sampling,
+        "uncovered_moves": sum(int(item.get("count", 0)) for item in uncovered),
+        "uncovered_reasons": len(uncovered),
         "uncovered_sample": uncovered[:10],
         "permutation_null": "per-window condition flags are exchangeable between "
                         "moves and controls",
@@ -1039,6 +1237,8 @@ def profile_context(conn, instrument_key, interval_seconds, move_hours=24, pre_h
                           "every stored series could appear in a full pre-window; controls are "
                           "stride-sampled non-move timestamps inside that period and are kept "
                           "only when they carry at least one stored observation",
+        "unverified_move_windows": sum(int(item.get("count", 0)) for item in uncovered
+                                       if "detector would refuse" in item["reason"]),
     }
     if not move_windows or not control_windows:
         base.update({"status": "insufficient_windows", "kinds": [], "families": [],
@@ -1050,6 +1250,9 @@ def profile_context(conn, instrument_key, interval_seconds, move_hours=24, pre_h
                      "note": "a window is only counted when the stored channel has at least "
                              "one observation inside it, so an empty result means the stored "
                              "records do not reach these windows"})
+        if measure:
+            base["measures"] = _measure_section([], [], {}, measure, measure_notes,
+                                                len(move_windows), len(control_windows))
         return base
     generator = random.Random(PERMUTATION_SEED)
     names = sorted({item for window in move_windows + control_windows
@@ -1063,6 +1266,24 @@ def profile_context(conn, instrument_key, interval_seconds, move_hours=24, pre_h
                               permutations, generator, names, coverage)
     base["families"] = _contrast(base, move_windows, control_windows, "families",
                                  permutations, generator, families)
+    if measure:
+        window_seconds = timedelta(hours=pre_hours)
+        measure_moves = [_measure_window(window) for window in move_windows]
+        measure_controls = [_measure_window(window) for window in control_windows]
+        measure_coverage = {}
+        for label, series in measure_points.items():
+            span = stationarity.coverage(
+                conn, series["kind"], series["measure"], series["instrument_key"],
+                window_seconds,
+                baseline=series["baselines"][0] if series["baselines"] else None)
+            if span is not None:
+                measure_coverage[label] = span
+        base["measures"] = _measure_section(
+            measure_moves, measure_controls, measure_coverage, measure, measure_notes,
+            len(move_windows), len(control_windows),
+            contrast=lambda names_: _contrast(
+                base, measure_moves, measure_controls, "categories", permutations,
+                random.Random(PERMUTATION_SEED), names_, measure_coverage))
     base["inference_status"] = _inference_status(
         len(move_windows), len(control_windows),
         [item["adjusted_magnitude_p"] for item in base["kinds"]
@@ -1086,16 +1307,27 @@ def profile_context(conn, instrument_key, interval_seconds, move_hours=24, pre_h
         "observations carry it.",
         "A move is only counted when at least one stored observation falls inside its "
         "pre-window, which biases the sample towards well-covered periods.",
+        "A stored move whose window spans a missing bar or does not cover the recorded "
+        "move length is left out, because the detector that wrote it may predate the "
+        "contiguity check; the count of those is reported as unverified_move_windows.",
         "Each kind is tested over its own coverage, so kinds are compared on different "
         "samples and their p-values are not jointly interpretable as one experiment.",
         "Control windows are stride-sampled non-move periods and are not matched on "
         "volatility, volume, hour of day or news density.",
+        "The number of control windows is a requested sample, not a property of the stored "
+        "data: control_sampling reports how many eligible non-move timestamps existed before "
+        "thinning, and a move group many times larger than the control group limits what the "
+        "permutation test can resolve regardless of the p-value.",
         "A kind present in every window carries no information; the enrichment ratio is "
         "undefined for it and its p-value is not evidence of anything.",
         "Serially adjacent windows and a single policy or flow event violate the exchangeable "
         "null, so p-values are optimistic.",
         "A recorded condition is context, not a cause. A policy action recorded before a move "
         "does not show it moved the price.",
+        "A level that drifts with the calendar is reported as confounded_by_time_trend and its "
+        "p-value is not a finding. The measures section answers the same question with a "
+        "stationary re-expression of each series, when one is requested; it is a second view "
+        "of the same windows, not a second experiment.",
     ]
     return base
 

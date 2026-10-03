@@ -22,9 +22,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lele.cli.main import (COMMANDS, READ_ONLY_COMMANDS, _read_only, build_parser,
-                               main)
-from lele.core import db, registry
+from lele.cli.main import (COMMANDS, NEVER_OPENS_REGISTRY, READ_ONLY_ACTIONS,
+                               READ_ONLY_COMMANDS, _read_only, build_parser, main)
+from lele.core import db, registry, schema
 
 
 def digest(path):
@@ -173,6 +173,7 @@ class ReadDoesNotWrite(RegistryCase):
             "store-evidence": (["1", "binance-futures", "BTCUSDT"], False),
             "prospective": (["score", "--ledger", "l.jsonl"], True),
             "volatility": (["1"], False),
+            "summary": (["--output", "s.md"], True),
         }
         for command, (extra, expected) in matrix.items():
             with self.subTest(command=command):
@@ -203,6 +204,13 @@ class ReadDoesNotWrite(RegistryCase):
             (("instruments", "show", ["1"]), True),
             (("instruments", "add", ["1", "--symbol", "BTCUSDT",
                                      "--asset-class", "bitcoin"]), False),
+            (("context", "series", []), True),
+            (("context", "show", []), True),
+            (("context", "derive", []), False),
+            (("prune", "plan", ["--before", "2026-01-01T00:00:00+00:00"]), True),
+            (("prune", "apply", ["--before", "2026-01-01T00:00:00+00:00",
+                                  "--reason", "storage"]), False),
+            (("prune", "runs", []), True),
         ]
         for (command, action, extra), expected in actions:
             with self.subTest(command=command, action=action):
@@ -213,14 +221,46 @@ class ReadDoesNotWrite(RegistryCase):
         # `framework` reads a module constant and returns before any connection is
         # opened. `menu` recurses into `main`, so every command it runs is
         # classified on its own behalf.
-        no_registry = {"version", "menu", "help", "framework"}
+        no_registry = NEVER_OPENS_REGISTRY | {"help"}
         self.assertEqual(READ_ONLY_COMMANDS - covered, set(),
                          "every read-only command must be reachable from this test")
         self.assertEqual(set(COMMANDS) - covered - no_registry, set(),
                          "every command that opens the registry must appear here, so a new "
                          "one cannot be added without deciding whether it reads or writes")
         for command in no_registry & set(COMMANDS):
-            self.assertNotIn(command, READ_ONLY_COMMANDS)
+            self.assertNotIn(command, READ_ONLY_COMMANDS,
+                             f"{command} never opens the registry, so labelling it read-only "
+                             "claims a guarantee that is not what makes it safe")
+        self.assertEqual(NEVER_OPENS_REGISTRY - set(COMMANDS), set(),
+                         "a command named as never opening the registry must exist")
+
+    def test_every_read_only_action_entry_is_live(self):
+        """An action entry must name an action the parser actually has.
+
+        A stale entry never fires, so it looks harmless while the command it
+        describes sits in the read-only table asserting a guarantee nothing
+        enforces. `store-evidence` carried one: it writes, and the day it grew an
+        `action` argument the entry would have handed it a read-only handle and
+        turned a working fetch into a "database is readonly" failure.
+        """
+        parser = build_parser()
+        choices = parser._subparsers._group_actions[0].choices
+        for command, actions in sorted(READ_ONLY_ACTIONS.items()):
+            with self.subTest(command=command):
+                self.assertIn(command, choices)
+                permitted = None
+                for action in choices[command]._actions:
+                    if action.dest == "action":
+                        permitted = set(action.choices or ())
+                self.assertIsNotNone(permitted,
+                                     f"{command} has no action argument, so an entry here "
+                                     "can never match")
+                self.assertEqual(set(actions) - permitted, set(),
+                                 f"{command} does not offer every action listed as read-only")
+                self.assertNotIn(command, READ_ONLY_COMMANDS,
+                                 "a command that is unconditionally read-only does not also "
+                                 "need an action entry, and the overlap hides which rule "
+                                 "is doing the work")
 
 
 class InMemoryTests(unittest.TestCase):
@@ -283,6 +323,36 @@ class MigrationSafety(RegistryCase):
         report = db.health_check(self.path)
         self.assertEqual(report["status"], "incomplete")
         self.assertIn("idx_move_events_tier", report["registry"]["missing_objects"])
+
+    def test_every_declared_object_is_named_when_it_is_missing(self):
+        """Drop each declared object in turn; the inventory has to name it.
+
+        The expected table and index inventory was a hand-maintained pair of
+        frozensets, and schema v18 added `context_measures` to the DDL and to
+        neither one. A v18 database missing that table then reported every table
+        present, opened without complaint, and failed later with "no such table"
+        from `lele context` -- which is defect A11 returning through a different
+        door, because the promise `doctor` keeps is only as good as the inventory
+        behind it.
+
+        The inventory is now read out of the DDL, so this test cannot pass while
+        an object is missing from it, and it fails loudly if anyone restores the
+        hand-written lists.
+        """
+        import shutil
+        self.assertIn("context_measures", schema.EXPECTED_TABLES,
+                      "the table whose absence went unnoticed must be in the inventory")
+        for name in sorted(schema.EXPECTED_TABLES) + sorted(schema.EXPECTED_INDEXES):
+            with self.subTest(object=name):
+                working = str(self.root / f"drop-{name}.db")
+                shutil.copy(self.path, working)
+                with db.get_conn(working) as conn:
+                    kind = "index" if name in schema.EXPECTED_INDEXES else "table"
+                    conn.execute(f"DROP {kind} {name}")
+                    report = db.object_inventory(conn)
+                absent = (report["missing_indexes"] if kind == "index"
+                          else report["missing_tables"])
+                self.assertEqual(absent, [name])
 
     def test_doctor_does_not_create_or_migrate(self):
         absent = str(self.root / "absent.db")

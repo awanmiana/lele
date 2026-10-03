@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from lele.cli.main import main
-from lele.core import constants
+from lele.core import constants, schema
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -36,7 +36,10 @@ class PackagingTests(unittest.TestCase):
     def test_supported_runtime(self):
         self.assertGreaterEqual(sys.version_info, (3, 11))
         self.assertGreaterEqual(sqlite3.sqlite_version_info, (3, 35, 0))
-        self.assertEqual(constants.REGISTRY_SCHEMA_VERSION, 17)
+        # Against the DDL rather than a second literal: the constant and the schema
+        # it names have to agree, and restating the number here only created a
+        # second place to forget.
+        self.assertEqual(constants.REGISTRY_SCHEMA_VERSION, schema.SCHEMA_VERSION)
 
     def test_version_command_json(self):
         out, err = io.StringIO(), io.StringIO()

@@ -39,18 +39,111 @@ detect-anomalies` that reads `price_bars` instead of a column nothing had ever
 written. Recorded in `AUDIT.md` §10–§11, including the three defects it closed and
 the two it introduced.
 
-**The next queue, in order.**
+**Queue item 1 is closed, and it overturned one recorded result rather than
+confirming it.** The M04/M05 negative finding was re-established from scratch,
+because the database that produced the recorded numbers no longer holds any price
+bars. Recorded in `AUDIT.md` §12:
 
-1. **Re-establish the M04/M05 enrichment results on the corrected detector.** The
-   recorded negative finding — that stablecoin supply and the fear and greed
-   index carry no discriminative power — is the most valuable result in the
-   project, and it was produced by code that could mis-measure a window. Until
-   it is re-run on the fixed detector it should be treated as provisional.
-2. **Prune `price_bars` and `move_events`.** Both grow without bound. Irrelevant
-   for daily bars on one instrument; not for five-minute bars on many.
+- The chain was rebuilt in a throwaway registry so the existing research database was
+  not written to: 3332 Binance daily bars (2017-08-17 to 2026-10-01), 1200 stablecoin
+  supply days, 3000 sentiment days, 364 instrument-bound market-activity days. The
+  corrected detector reproduced the recorded counts exactly — 856 candidates, 628
+  retained moves, p3 628 / p5 323 / p7 173 / p11 45 — so the detector was never the
+  reason the comparison differs.
+- **Defect closed:** all four readers of stored `move_events` trusted the stored row's
+  window without re-checking it, so a row from a superseded detector could anchor a
+  pre-window to the wrong date. `moves.verify_stored` re-derives cadence, gaps and
+  horizon from the stored bars and refuses a row with a named reason; the readers
+  report what they dropped. Refused rows on the live data: 0.
+- **Defect closed:** `--controls` defaults to 10, so the first live run compared 526
+  move windows against 9 and looked like any other result. That is not a weaker test,
+  it is a different one — the raw p on stablecoin supply was 0.93 at 9 controls and
+  0.031 at 499. `control_sampling` now publishes requested / eligible / used / ratio.
+- **The result, at 499 controls:** nothing survives the correction at any tier, which
+  confirms the recorded negative finding. But the recorded *monotone* stablecoin
+  pattern does not reproduce: −$15.8bn at p3 (adjusted 0.093), −$12.3bn at p5,
+  −$27.6bn at p7, and **+$14.3bn at p11**, with a 2.33 sd drift throughout. The
+  monotone shape was an artifact of a small control group drawn from across a series
+  that rises by an order of magnitude. This is the first result in this project that
+  a re-run has overturned rather than confirmed, and the re-establishment is the
+  reason.
+
+**`lele summary` was added 2026-10-02 and is not a queue item.** A generated
+capability inventory that prints and saves a formatted document, built from the
+command table, the argument parser and the module taxonomies rather than from
+prose, so it cannot drift. `lele menu` already ran every command; what was missing
+was a way to *read* the surface area. Building it found two false claims — a
+"5 public sources" count that understated the allowlist by tenfold, and a dead
+`READ_ONLY_ACTIONS` entry that called the writing `store-evidence` read-only. See
+`AUDIT.md` §13. One durable side effect: that table can no longer rot silently.
+
+**Retention was added 2026-10-03 and closes queue item 2.** `lele prune
+plan|apply|runs` cuts stored price history before a stated instant, with the
+derived rows whose own window ended before it, and records the cut so a later
+report can say the history was *removed* rather than never fetched. Building it
+found three defects that were already in the tree — the schema inventory had
+drifted so `doctor` could no longer fail on a missing v18 table, a test helper
+leaked a connection into an unrelated test's failure, and the capability summary
+sorted a frozen vocabulary it claimed to quote — two that only the new tests found (a scoped
+`apply` that deleted the bars and kept the derived rows, and a skip that fired on a
+cut that could select the table), and one that only the live run found, a read-only
+open on an older registry raising `no such table`. See
+`AUDIT.md` §15. One durable side effect: the expected table and index inventory is
+now read out of the DDL, so `doctor` cannot be wrong by omission again.
+
+**The next queue, in order.** Items 1, 1a, the capability summary and 2 are closed
+above; the rest are unchanged.
+
+1. **Re-establish the M04/M05 enrichment results on the corrected detector.**
+   **CLOSED 2026-10-02, recorded in `AUDIT.md` §12.** Kept in the list so the reason
+   it was first is not lost: the recorded negative finding was produced by code that
+   could mis-measure a window.
+1a. **Store context as stationary quantities.** **CLOSED 2026-10-02, recorded in
+   `AUDIT.md` §14.** Kept in the list because the reason it existed is worth
+   keeping. `stablecoin_supply` drifted 2.33 standard deviations across the
+   compared windows at every tier, which made its raw difference unreadable
+   however large the sample. `analysis/stationarity.py` derives `change` and
+   `zscore` from stored rows into a new `context_measures` table (schema v18) with
+   the parameters that produced each value, and `causes context --measure` compares
+   them over the same windows under the same permutation test. **On the §12 data
+   the confound falls from 2.33 sd to 0.03–0.16 and the comparison it was blocking
+   is negative at every tier** — the level's nearest approach, adjusted 0.093 at p3,
+   becomes 0.193 on its change and 0.157 on its z-score. The default is off, so no
+   recorded figure was restated.
+   **Half the item was false and is now recorded as measured:** extending
+   `market_activity` over years does *not* need no new provider. CoinGecko's
+   keyless endpoint answers `days=365` with 366 points and `days=400` with
+   **HTTP 401**. The 365-day cap is the free tier's edge, not a choice, so `p11`
+   still leaves that series one measured move window and no code change makes it
+   otherwise.
+1a-old. The M02 sub-question is unchanged and still unanswered: every wired
+   context source is daily, so a 24-hour pre-window is saturated and only the
+   measured-mean difference is testable at all. Stationarity does not change that.
+2. **Prune `price_bars` and `move_events`.** **CLOSED 2026-10-03, recorded in
+   `AUDIT.md` §15.** Both grew without bound, and so did `volatility_estimates`,
+   `cause_scans` and `price_anomalies`. `lele prune plan|apply|runs`
+   (`analysis/retention.py`, `prune_runs` table, schema v19) removes price history
+   before a stated instant together with the derived rows whose own window ended
+   before it. A plan is pure reads and runs on a read-only mount; `apply` deletes
+   through the same predicate the plan counted with and records the cut, and
+   `registry.stored_bar_span` carries the recorded cut into every report that
+   measures a series — so a window before a cut says the history was *removed*
+   rather than being indistinguishable from a window that was never fetched. A row
+   that straddles the cut is kept and counted; a cut leaving a series shorter than
+   the move detector can measure is **refused with the series named**; the reason
+   is required; filed observations, ingest runs, evidence events and
+   `context_measures` are never pruned and the report says why each is not.
+   Measured on a copy of the §12 registry: a cut at 2024-01-01 keeping 400 bars
+   removes 2326 bars and 966 move rows and leaves 1006.
+   **`context_measures` is still unbounded in the sense the item meant** — it is
+   bounded by its parent series and by provider reach, not by price history, and
+   this command does not prune it because cutting the parent observations is a
+   decision about evidence, not about history.
 3. **Provider health monitoring.** `ingest_runs` already records a request hash
    and a record hash per run. Nothing consumes them. A source that starts
-   returning garbage is currently noticed only by a human reading a report.
+   returning garbage is currently noticed only by a human reading a report. Note
+   that `prune` now reads those hashes' table on every stored-bar report, so
+   provider health is the next thing that can consume them.
 4. **Finish the type annotations.** The gate prevents the debt growing in the
    foundation; it does not repay it in the historical modules. 542 functions
    still carry no annotation and their bodies are the only thing checked.
@@ -225,8 +318,8 @@ Earlier live checks: 25 GLEIF GB funds; SEC Apple submissions/facts and analysis
 | M01 | Implemented, verified offline and live | Tiered price moves and pre-move cause scan | `fetch-history` stores Binance spot OHLC into `price_bars` idempotently on `(instrument, interval, open_time)`, walking backward in bounded 1000-bar pages for `1d`/`4h`/`1h` (live: 3326 daily bars, 2017-08-17 to 2026-09-25). `moves` detects tiered fixed-horizon returns, retains only windows sharing no bar so a fall is not counted per bar, and scores each against a trailing baseline of returns strictly before its own window. `causes attribute` classifies pre-move headlines into a fixed cause lexicon with sentiment and stores per-move category sets, separating `attributed`/`attributed_truncated`/`no_articles`/`provider_unavailable`; `causes profile` reports move-vs-control share, enrichment and a seeded permutation p-value under an explicit null with a multiple-testing warning. `scan` applies the same detector to the newest bars across 24/48/72h horizons and four channels (`stored` observations, `news`, futures `structure`, `market`) mapped to seven cause families including `money_movement` and `policy_decision`. `observations.ingest_evidence` bridges a fetcher payload into the `observations` table, which previously only accepted hand-written files. 31 offline tests; live 2026-09-26: 323 retained daily moves whose largest are the 2020-03 COVID crash, 2017-12 peak, 2021-02 rally, 2021-05 China-crackdown selloff and 2022-02 Ukraine rally; one 72h scan returned 84 signals across all 7 families while GDELT refused 2 of 3 tiles after 3 attempts each, reported per tile. **Not achieved:** no cause is established, no manipulation is identified, nothing is forecast, and the public news index throttles, caps and lags, so cause coverage is thin and uneven |
 | M02 | Implemented, verified offline and live | Measured market context for the pre-move scan | `fetch-sentiment` stores the public daily crypto fear and greed index as market-wide `social_sentiment` observations (composite, so `basis=estimated`, available from the following UTC day); `fetch-stablecoins` stores daily aggregate stablecoin supply as market-wide `stablecoin_supply`, summing the provider's per-peg-currency objects and keeping the USD-pegged part and peg count separately. `signals.stored` now reads two scopes: instrument-bound rows and market-wide rows restricted to a fixed kind whitelist, so a routed flow between named organisations is never presented as context for an unrelated instrument, and rows excluded for being newer than the window are reported by kind instead of disappearing. `cot_positioning` and `cot_open_interest` were mapped to `market_structure`; without them instrument-bound COT rows were dropped. 17 offline tests. Live 2026-09-26: 900 sentiment days and 2500 supply days stored, newest supply $313.2bn; a current reading shows 2 `money_movement`, 60 `policy_decision` and 2 `sentiment_emotion` market-wide signals. Fixed a pre-existing `fetch-political` failure: verbose Federal Register documents overflowed the bounded observation evidence field and aborted the whole fetch, so the main policy source could not store real records; evidence is now bounded and reduced, naming what it dropped. Live 60 documents stored. **Not achieved:** neither series is a cause, a net flow or an attributable actor, the sentiment index composition is not audited, and no threshold is claimed to be predictive |
 | M03 | Implemented, verified offline and live | Per-asset capital activity and a second headline source | `fetch-market-activity ID --coin --days` reads a second public provider's daily series and binds it to the entity, storing the day-on-day market capitalisation change as `market_activity` (new kind, `money_movement` family) with level, close and volume in evidence; live 179 observations including a single-day $36.1bn fall. `fetch-news-feed` reads a public multi-publisher news feed as a drop-in alternative to the keyword index inside the same signal detector, keeping the publisher name and trimming the appended publisher suffix, and refusing any document type or entity declaration before parsing; live 75 observations including current-hour coverage the keyword index could not serve. `--news-source {gdelt,google_news}` selects the provider on `scan` and `causes attribute`; live with the feed provider all three 24-hour tiles succeeded where the keyword index refused two of three. `HTTPClient.get_text` was added so a non-JSON document shares the existing host pacing and byte ceiling instead of a second request path. 11 offline tests. **Not achieved:** market capitalisation change is a proxy that rises with price and cannot distinguish buying from selling; the feed serves a shorter window and fewer items than the index; cross-provider agreement is within each source's own sampling and rounding and is not a verified reconciliation |
-| M04 | Implemented, verified offline; live result is negative | Enrichment statistics and stored-context profile | `causes context` profiles stored conditions (money movement, policy, sentiment, macro) before moves against control windows, so it is not limited by news provider reach. Reports enrichment, a seeded permutation p-value and a **Benjamini-Hochberg adjusted p-value** at alpha 0.05, with `significant_after_correction` as the only reportable flag and `inference_status` withholding a verdict below 8 move and 8 control windows. Three anti-confound rules, each test-asserted: windows are kept only when the stored channel has coverage, applied identically to moves and controls; each kind is tested over its own coverage so a 180-day series is not compared against a year of history; controls are spread across the whole span rather than clustering in the oldest part. A one-window group yields no p-value. **Live result on the stored 4h series is a negative finding:** every condition reads move_share 1.0 vs control_share 1.0 with p=1.0, because daily-cadence context is saturated inside a 24-hour window, while 6- and 12-hour windows leave most windows empty. The current free context sources have no discriminative power for this question; only higher-cadence context would change that. 14 offline tests. **Not achieved:** no condition stands out, so nothing is claimed; the headline profile remains limited to 1 of 113 move windows being inside either provider's reach, and GDELT was unreachable for the whole of this session |
-| M05 | Implemented, verified offline; live result is negative | Percentage threshold ladder and measured-condition contrast | **User-directed:** big moves are too rare to test, so targets are now an absolute percentage ladder `--thresholds 3 5 7 11`, recorded **cumulatively**: a 12% move is stored at `p3`, `p5`, `p7` and `p11`, so each tier is a cumulative sample and `--tier p3` yields a testable one. Schema v16 replaces the two-tier vocabulary with percent labels `pN` (`CHECK(tier LIKE 'p%')`, validated by `move_tier_percent`), with a lossless migration that rebuilds `move_events` and `move_causes` in dependency order. Live: 856 candidates to 628 retained moves and 1169 tier rows (p3 628, p5 323, p7 173, p11 45). The context profile now tests the **difference in measured means** rather than presence, because presence saturates when a daily-cadence series falls inside every 24-hour window, and it withholds any comparison whose level drifts with calendar time by at least one standard deviation. **Live result: nothing survives.** The p3 tier gives 433 move windows against 99 controls, so the sample is no longer the constraint. Stablecoin supply reads −$31.5bn (p=0.003, adjusted 0.009) before moves versus controls, with the difference growing to −$52.4bn at p7, but the level drifts 2.1 standard deviations across the compared windows and is reported confounded rather than as a result. **Not achieved:** no condition stands out at any rung; a trending level cannot be tested this way and must be stored as a change, rate, ratio or self-referenced z-score, which no currently wired free source is |
+| M04 | Implemented, verified offline; live result is negative | Enrichment statistics and stored-context profile | `causes context` profiles stored conditions (money movement, policy, sentiment, macro) before moves against control windows, so it is not limited by news provider reach. Reports enrichment, a seeded permutation p-value and a **Benjamini-Hochberg adjusted p-value** at alpha 0.05, with `significant_after_correction` as the only reportable flag and `inference_status` withholding a verdict below 8 move and 8 control windows. Three anti-confound rules, each test-asserted: windows are kept only when the stored channel has coverage, applied identically to moves and controls; each kind is tested over its own coverage so a 180-day series is not compared against a year of history; controls are spread across the whole span rather than clustering in the oldest part. A one-window group yields no p-value. **Live result on the stored 4h series is a negative finding:** every condition reads move_share 1.0 vs control_share 1.0 with p=1.0, because daily-cadence context is saturated inside a 24-hour window, while 6- and 12-hour windows leave most windows empty. The current free context sources have no discriminative power for this question; only higher-cadence context would change that. 14 offline tests. **RE-ESTABLISHED 2026-10-02 (`AUDIT.md` §12): the saturation finding reproduces** and is unchanged in kind — presence is 1.0 against 1.0 with p=1.0 for a daily-cadence series inside a 24-hour window, so only the measured-mean difference is testable. No claim about conditions preceding a move survives the correction. **Not achieved:** no condition stands out, so nothing is claimed; the headline profile remains limited to 1 of 113 move windows being inside either provider's reach, and GDELT was unreachable for the whole of this session |
+| M05 | Implemented, verified offline; live result is negative | Percentage threshold ladder and measured-condition contrast | **User-directed:** big moves are too rare to test, so targets are now an absolute percentage ladder `--thresholds 3 5 7 11`, recorded **cumulatively**: a 12% move is stored at `p3`, `p5`, `p7` and `p11`, so each tier is a cumulative sample and `--tier p3` yields a testable one. Schema v16 replaces the two-tier vocabulary with percent labels `pN` (`CHECK(tier LIKE 'p%')`, validated by `move_tier_percent`), with a lossless migration that rebuilds `move_events` and `move_causes` in dependency order. Live: 856 candidates to 628 retained moves and 1169 tier rows (p3 628, p5 323, p7 173, p11 45). The context profile now tests the **difference in measured means** rather than presence, because presence saturates when a daily-cadence series falls inside every 24-hour window, and it withholds any comparison whose level drifts with calendar time by at least one standard deviation. **Live result: nothing survives.** The p3 tier gives 433 move windows against 99 controls, so the sample is no longer the constraint. Stablecoin supply reads −$31.5bn (p=0.003, adjusted 0.009) before moves versus controls, with the difference growing to −$52.4bn at p7, but the level drifts 2.1 standard deviations across the compared windows and is reported confounded rather than as a result. **RE-ESTABLISHED 2026-10-02 (`AUDIT.md` §12) and one recorded pattern is OVERTURNED:** the negative finding reproduces — nothing survives the correction at any tier with 499 controls — but the monotone stablecoin-supply pattern does not. The difference is −$15.8bn (adjusted 0.093) at p3, −$12.3bn at p5, −$27.6bn at p7 and **+$14.3bn at p11**, with a 2.33 sd drift at every tier. The monotone shape was an artifact of a control group of 9 drawn from across a series that rises by an order of magnitude; see item 1a. **Not achieved:** no condition stands out at any rung; a trending level cannot be tested this way and must be stored as a change, rate, ratio or self-referenced z-score, which no currently wired free source is |
 | P09 | Pending | Constructed indicators and prospective validation | Pre-register each indicator spec (inputs, window, normalization, direction convention, expected sign) before outcomes, freeze as a method, project into `worldstate`/`prospective`, and score direction/tolerance with non-event controls; never claim skill without independent out-of-sample multi-asset evidence |
 | F04 | Pending: source-selection first | Valuation inputs and comparisons | Separate book values from dated market prices and private valuations; licensed price source, no invented values |
 | E03 | Implemented, verified offline | Parent/umbrella traversal and reporting exceptions | `edges --kind parent --source gleif [--level direct|ultimate]` follows `/lei-records/{LEI}/{direct,ultimate}-parent-relationship`, stores `subsidiary_of`/`ultimate_subsidiary_of` child→parent edges for the matching ACTIVE `IS_*_CONSOLIDATED_BY` type, and preserves the exact relationship JSON; it distinguishes no-parent (404), reported-but-unusable or level-mismatched (level-specific exception attribute) and missing, and reuses refresh/retract/retry. `tree ID [--depth] [--direction] [--max-nodes]` reports a bounded consolidation tree with per-node `parent_status` (recorded/exception/unknown), edge provenance, cycle counting and truncation. Live-verified Google LLC → ALPHABET INC. at both levels. Control, ownership and beneficial-ownership claims are out of scope |

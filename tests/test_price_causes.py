@@ -528,6 +528,7 @@ class ProfileTests(RegistryCase):
             available_at="2026-02-01T00:00:00+00:00")
 
     def test_enrichment_and_permutation_p_value_are_reported(self):
+        bars(self.conn, [100.0] * 10)
         for index in range(1, 9):
             move_id = self._move(index)
             self._cause(move_id, "etf_institutional", key=f"m{index}")
@@ -565,11 +566,44 @@ class ProfileTests(RegistryCase):
         self.assertIn("multiple_testing", result)
 
     def test_profile_without_attribution_says_so(self):
+        bars(self.conn, [100.0] * 10)
         self._move(1)
         self.conn.commit()
         result = causes.profile(self.conn, KEY, 86400, 24, 24, permutations=200)
         self.assertEqual(result["status"], "no_attributed_moves")
         self.assertEqual(result["move_windows"], 0)
+
+    def test_profile_leaves_out_a_window_the_detector_would_refuse(self):
+        """A row from a superseded detector must not be profiled as a move.
+
+        It labels a 24-hour move but its window covers four days, so the
+        pre-window the profile would read is anchored three days early.
+        """
+        bars(self.conn, [100.0] * 10)
+        good = self._move(1)
+        self._cause(good, "etf_institutional", key="m1")
+        stale = registry.add_move_event(
+            conn=self.conn, instrument_key=KEY, interval_seconds=86400, move_hours=24,
+            tier="p10", threshold_percent="10", direction="down",
+            start_time="2026-01-05T00:00:00+00:00",
+            end_time="2026-01-09T00:00:00+00:00", start_price="100",
+            end_price="80", change_percent="-20", terminal_bar_range_percent="25",
+            baseline_mean_percent="0", baseline_std_percent="2", z_score="-10",
+            detected_at="2026-02-01T00:00:00+00:00",
+            available_at="2026-02-01T00:00:00+00:00")
+        self._cause(stale, "geopolitics", key="s1")
+        for index in (1, 2):
+            registry.add_move_cause(
+                conn=self.conn, role="control", control_key=f"{KEY}|86400|2026-02-0{index}",
+                category="etf_institutional", article_id=f"gdelt:c{index}",
+                observed_at="2026-02-01T00:00:00+00:00", headline="headline", source="gdelt",
+                retrieved_at="2026-02-01T00:00:00+00:00")
+        self.conn.commit()
+        result = causes.profile(self.conn, KEY, 86400, 24, 24, permutations=200)
+        self.assertEqual(result["unverified_move_windows"], 1)
+        self.assertEqual(result["move_windows"], 1)
+        self.assertIn("does not cover the recorded move length",
+                      " ".join(item["reason"] for item in result["unverified_sample"]))
 
     def test_permutation_is_reproducible(self):
         first = causes._permutation([1, 1, 0, 0], [0, 0, 0, 0], 500,

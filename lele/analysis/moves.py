@@ -418,6 +418,69 @@ def current(conn, instrument_key, interval_seconds, move_hours=24):
     }
 
 
+def verify_stored(conn, instrument_key, interval_seconds, rows):
+    """Split stored move rows into those the detector would accept and those it would not.
+
+    A stored row records a start and an end but nothing about the bars between
+    them. `detect` refuses a candidate whose window spans a hole or whose real
+    elapsed time is not the requested horizon, so a stored row that fails either
+    test was written by a superseded detector, or its bars have since been
+    pruned or replaced. Either way the row does not describe the window it is
+    labelled with, and anything that reads stored moves -- the two profiles in
+    `causes` and the window report in `timeline` -- would otherwise attribute a
+    finding to a different measurement than the one named. With no stored bars at
+    all nothing can be verified, so every row is refused rather than trusted. Both
+    checks reuse the same cadence, gap and horizon rules `detect` uses, so there
+    is one definition of a valid window.
+    """
+    if type(interval_seconds) is not int or interval_seconds < 60:
+        raise ValueError("interval seconds must be an integer of at least 60")
+    stored = registry.list_price_bars(conn, instrument_key, interval_seconds, limit=MAX_BARS)
+    times, index = [], {}
+    for row in stored:
+        try:
+            moment = _time(row["open_time"])
+        except (ValueError, TypeError):
+            continue
+        times.append(moment)
+        index[moment] = len(times) - 1
+    if not times:
+        return [], [{"move_event_id": row.get("id"), "start_time": row.get("start_time"),
+                     "end_time": row.get("end_time"),
+                     "reason": "no stored bars to verify the window against"}
+                    for row in rows]
+    cadence = _cadence(times, interval_seconds)
+    gaps = _gaps(times, cadence)
+    kept, refused = [], []
+    for row in rows:
+        try:
+            start = _time(row["start_time"])
+            end = _time(row["end_time"])
+            target = float(row["move_hours"]) * 3600
+        except (ValueError, TypeError, KeyError, ArithmeticError):
+            refused.append({"move_event_id": row.get("id"), "start_time": row.get("start_time"),
+                            "end_time": row.get("end_time"),
+                            "reason": "the stored row has no readable window"})
+            continue
+        reason = None
+        if start not in index:
+            reason = "the bar the window starts on is not in stored history"
+        elif end not in index:
+            reason = "the bar the window ends on is not in stored history"
+        elif end <= start:
+            reason = "the stored window does not run forwards"
+        elif any(gap in gaps for gap in range(index[start] + 1, index[end] + 1)):
+            reason = "a bar is missing inside the stored window"
+        elif abs((end - start).total_seconds() - target) > max(target * 0.05, 1):
+            reason = "the stored window does not cover the recorded move length"
+        if reason:
+            refused.append({"move_event_id": row.get("id"), "start_time": row["start_time"],
+                            "end_time": row["end_time"], "reason": reason})
+        else:
+            kept.append(row)
+    return kept, refused
+
+
 def windows(moves, pre_hours, provider_window_hours, now=None):
     """Pre-move news windows for each move, clipped to what the provider can serve.
 

@@ -6,9 +6,10 @@ can be derived from the same source instead of being restated by hand and
 drifting away from it.
 """
 
+import re
 import sqlite3
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 19
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(
@@ -364,6 +365,27 @@ CREATE TABLE IF NOT EXISTS volatility_estimates(
     UNIQUE(instrument_key, interval_seconds, estimator, window_bars, as_of));
 CREATE INDEX IF NOT EXISTS idx_volatility_estimates_series
     ON volatility_estimates(instrument_key, interval_seconds, estimator, as_of);
+CREATE TABLE IF NOT EXISTS context_measures(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_kind TEXT NOT NULL CHECK(length(trim(source_kind)) > 0),
+    instrument_key TEXT NOT NULL DEFAULT '',
+    measure TEXT NOT NULL CHECK(length(trim(measure)) > 0),
+    baseline_observations INTEGER NOT NULL DEFAULT 0,
+    value TEXT NOT NULL CHECK(length(trim(value)) > 0),
+    unit TEXT NOT NULL DEFAULT '',
+    prior_observed_at TEXT NOT NULL DEFAULT '',
+    cadence_seconds INTEGER NOT NULL DEFAULT 0,
+    baseline_mean TEXT NOT NULL DEFAULT '',
+    baseline_deviation TEXT NOT NULL DEFAULT '',
+    ddof INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT '',
+    observed_at TEXT NOT NULL,
+    available_at TEXT NOT NULL,
+    source_url TEXT NOT NULL DEFAULT '',
+    evidence TEXT NOT NULL DEFAULT '',
+    UNIQUE(source_kind, instrument_key, measure, baseline_observations, observed_at));
+CREATE INDEX IF NOT EXISTS idx_context_measures_series
+    ON context_measures(source_kind, instrument_key, measure, observed_at);
 CREATE TABLE IF NOT EXISTS move_events(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     instrument_key TEXT NOT NULL,
@@ -430,6 +452,18 @@ CREATE TABLE IF NOT EXISTS cause_scans(
     evidence TEXT,
     UNIQUE(instrument_key, interval_seconds, move_hours, as_of));
 CREATE INDEX IF NOT EXISTS idx_cause_scans_series ON cause_scans(instrument_key, as_of);
+CREATE TABLE IF NOT EXISTS prune_runs(
+   id INTEGER PRIMARY KEY AUTOINCREMENT,
+   cut TEXT NOT NULL,
+   reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+   keep_bars INTEGER NOT NULL CHECK(keep_bars >= 1),
+   instrument_key TEXT NOT NULL DEFAULT '',
+   interval_seconds INTEGER NOT NULL DEFAULT 0,
+   applied_at TEXT NOT NULL,
+   deleted TEXT NOT NULL DEFAULT '{}',
+   spans_cut TEXT NOT NULL DEFAULT '{}',
+   series TEXT NOT NULL DEFAULT '[]');
+CREATE INDEX IF NOT EXISTS idx_prune_runs_series ON prune_runs(instrument_key, cut);
 """
 
 
@@ -447,9 +481,44 @@ def table_definition(name: str) -> str:
     raise KeyError(name)
 
 
-EXPECTED_TABLES = frozenset(['attributes', 'cause_scans', 'edge_retry', 'edges', 'entities', 'entity_aliases', 'entity_links', 'event_relationships', 'event_store', 'event_volatility_links', 'filings', 'ingest_runs', 'instruments', 'meta', 'metrics', 'money_flow_attribution', 'money_flows', 'move_causes', 'move_events', 'observations', 'pattern_matches', 'price_anomalies', 'price_bars', 'sanctions_links', 'sanctions_listings', 'semantic_embeddings', 'signals', 'volatility_estimates', 'volatility_instances'])
+#: Every table and index the DDL above declares, read out of it rather than
+#: restated. This was a hand-maintained pair of frozensets, which is how the
+#: module docstring's claim -- that the inventory comes from the same source as
+#: the DDL -- stopped being true: schema v18 added `context_measures` and
+#: `idx_context_measures_series` to the DDL and to neither list, so a v18
+#: database missing that table reported every table present, opened without
+#: complaint, and failed later with "no such table" from the one command that
+#: reads it. `tests/test_db_guarantees.py` now drops each declared object in turn
+#: and requires the registry to name it.
+_DECLARED = re.compile(
+    r"CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
 
-EXPECTED_INDEXES = frozenset(['idx_aliases_canonical', 'idx_cause_scans_series', 'idx_embeddings_entity', 'idx_embeddings_kind', 'idx_event_rel_source', 'idx_event_rel_target', 'idx_event_store_actor', 'idx_event_store_instrument', 'idx_event_store_type', 'idx_event_vol_event', 'idx_event_vol_volatility', 'idx_flows_dst', 'idx_flows_src', 'idx_instruments_class', 'idx_instruments_entity', 'idx_links_entity', 'idx_money_attrib_event', 'idx_money_attrib_flow', 'idx_move_causes_category', 'idx_move_causes_control', 'idx_move_causes_window', 'idx_move_events_series', 'idx_move_events_tier', 'idx_observations_actor', 'idx_observations_instrument', 'idx_pattern_current', 'idx_pattern_historical', 'idx_price_anomaly_instrument', 'idx_price_bars_series', 'idx_signals_ent', 'idx_volatility_estimates_series', 'idx_volatility_instrument', 'idx_volatility_magnitude'])
+
+def declared_objects() -> tuple[frozenset, frozenset]:
+    """The table and index names the DDL declares.
+
+    A statement this pattern does not recognise is a statement that is executed
+    but invisible to the inventory, which is the drift above in the making, so it
+    raises rather than being skipped.
+    """
+    tables: set[str] = set()
+    indexes: set[str] = set()
+    unparsed: list[str] = []
+    for statement in statements():
+        match = _DECLARED.match(statement)
+        if match is None:
+            unparsed.append(statement.split("(")[0].strip())
+            continue
+        target = tables if match.group(1).upper() == "TABLE" else indexes
+        target.add(match.group(2))
+    if unparsed:
+        raise ValueError("schema statements this module cannot inventory: "
+                         + ", ".join(unparsed))
+    return frozenset(tables), frozenset(indexes)
+
+
+EXPECTED_TABLES, EXPECTED_INDEXES = declared_objects()
 
 
 def inventory(conn: sqlite3.Connection) -> tuple[set, set]:

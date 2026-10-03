@@ -1271,6 +1271,136 @@ def list_volatility_estimates(conn, instrument_key: str, interval_seconds: int, 
     return [dict(row) for row in conn.execute(sql, params)]
 
 
+# --- context measures ---
+
+CONTEXT_MEASURES = ("change", "zscore")
+
+
+def add_context_measure(conn, *, source_kind: str, measure: str, value: str,
+                        observed_at: str, available_at: str, instrument_key: str = "",
+                        baseline_observations: int = 0, unit: str = "",
+                        prior_observed_at: str = "", cadence_seconds: int = 0,
+                        baseline_mean: str = "", baseline_deviation: str = "",
+                        ddof: int = 0, source: str = "", source_url: str = "",
+                        evidence: str = "") -> int:
+    """Store one stationary quantity derived from a stored context series.
+
+    The measure name is not reproducible on its own, for the same reason the
+    volatility estimator name is not: a difference needs the interval it spans,
+    and a z-score needs the baseline it was taken against and the degrees of
+    freedom that produced its spread. All of that is stored as data, and
+    `baseline_observations` is part of the uniqueness key so a score against a
+    longer baseline cannot silently overwrite one against a shorter one.
+
+    These rows are deliberately not `observations`. A derived quantity is not a
+    second reading of the world, and putting it in that table would let a
+    difference and a level be listed side by side as if both had been observed.
+    """
+    _observation_text(source_kind, "source_kind", 128, True)
+    _observation_text(instrument_key, "instrument_key", 512)
+    _observation_text(measure, "measure", 64, True)
+    if measure not in CONTEXT_MEASURES:
+        raise ValueError(f"measure must be one of {', '.join(CONTEXT_MEASURES)}")
+    if type(baseline_observations) is not int or baseline_observations < 0:
+        raise ValueError("baseline_observations must be a nonnegative integer")
+    if type(cadence_seconds) is not int or cadence_seconds < 0:
+        raise ValueError("cadence_seconds must be a nonnegative integer")
+    if type(ddof) is not int or ddof < 0:
+        raise ValueError("ddof must be a nonnegative integer")
+    if measure == "change" and baseline_observations:
+        raise ValueError("a difference is taken between two points and has no baseline length")
+    if measure == "zscore" and baseline_observations < 2:
+        raise ValueError("a z-score needs at least two baseline observations")
+    _observation_text(unit, "unit", 128)
+    _observation_text(prior_observed_at, "prior_observed_at", 64)
+    _observation_text(source, "source", 256)
+    _observation_text(source_url, "source_url", 4096)
+    _observation_text(evidence, "evidence")
+    for label, moment in (("observed_at", observed_at), ("available_at", available_at)):
+        _observation_text(moment, label, 64, True)
+    if available_at < observed_at:
+        raise ValueError("availability cannot precede observation")
+    numbers = {"value": _decimal_text(value, "value"),
+               "baseline_mean": _decimal_text(baseline_mean, "baseline_mean", required=False),
+               "baseline_deviation": _decimal_text(baseline_deviation, "baseline_deviation",
+                                                   required=False)}
+    row = conn.execute(
+        """INSERT INTO context_measures(source_kind, instrument_key, measure,
+             baseline_observations, value, unit, prior_observed_at, cadence_seconds,
+             baseline_mean, baseline_deviation, ddof, source, observed_at, available_at,
+             source_url, evidence)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(source_kind, instrument_key, measure, baseline_observations, observed_at)
+           DO UPDATE SET
+             value=excluded.value, unit=excluded.unit,
+             prior_observed_at=excluded.prior_observed_at,
+             cadence_seconds=excluded.cadence_seconds,
+             baseline_mean=excluded.baseline_mean,
+             baseline_deviation=excluded.baseline_deviation, ddof=excluded.ddof,
+             source=excluded.source, available_at=excluded.available_at,
+             source_url=excluded.source_url, evidence=excluded.evidence
+           RETURNING id""",
+        (source_kind, instrument_key, measure, baseline_observations, numbers["value"],
+         unit, prior_observed_at, cadence_seconds, numbers["baseline_mean"],
+         numbers["baseline_deviation"], ddof, source, observed_at, available_at,
+         source_url, evidence),
+    ).fetchone()
+    return int(row[0])
+
+
+def context_measure_series(conn) -> list[dict]:
+    """Every stored measure series, with the span and count it actually covers."""
+    rows = conn.execute(
+        """SELECT source_kind, instrument_key, measure, baseline_observations, ddof,
+                  COUNT(*) AS observations, MIN(observed_at) AS first, MAX(available_at) AS last,
+                  MIN(unit) AS unit, MIN(source) AS source
+           FROM context_measures
+           GROUP BY source_kind, instrument_key, measure, baseline_observations, ddof
+           ORDER BY source_kind, instrument_key, measure, baseline_observations"""
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_context_measures(conn, source_kind: str, *, instrument_key: str = "",
+                          measure: str = "", baseline_observations: int | None = None,
+                          start: str = "", end: str = "", limit: int = 1000,
+                          order: str = "desc") -> list[dict]:
+    _observation_text(source_kind, "source_kind", 128, True)
+    _observation_text(instrument_key, "instrument_key", 512)
+    _observation_text(measure, "measure", 64)
+    if measure and measure not in CONTEXT_MEASURES:
+        raise ValueError(f"measure must be one of {', '.join(CONTEXT_MEASURES)}")
+    if baseline_observations is not None and (
+            type(baseline_observations) is not int or baseline_observations < 0):
+        raise ValueError("baseline_observations must be a nonnegative integer")
+    if type(limit) is not int or not 1 <= limit <= 20000:
+        raise ValueError("limit must be an integer from 1 to 20000")
+    if order not in ("asc", "desc"):
+        raise ValueError("order must be asc or desc")
+    sql = "SELECT * FROM context_measures WHERE source_kind=?"
+    params: list = [source_kind]
+    if instrument_key:
+        sql += " AND instrument_key=?"
+        params.append(instrument_key)
+    if measure:
+        sql += " AND measure=?"
+        params.append(measure)
+    if baseline_observations is not None:
+        sql += " AND baseline_observations=?"
+        params.append(baseline_observations)
+    if start:
+        _observation_text(start, "start", 64, True)
+        sql += " AND observed_at>=?"
+        params.append(start)
+    if end:
+        _observation_text(end, "end", 64, True)
+        sql += " AND observed_at<=?"
+        params.append(end)
+    sql += f" ORDER BY observed_at {order.upper()}, id {order.upper()} LIMIT ?"
+    params.append(limit)
+    return [dict(row) for row in conn.execute(sql, params)]
+
+
 # `open`, `high`, `low` and `close` are the provider and schema field names, so
 # this published signature keeps its spelling; the builtin-shadowing rule exists
 # to catch accidents, not to rename an interface every caller uses.
@@ -1712,10 +1842,14 @@ def stored_bar_span(conn, instrument_key: str, interval_seconds: int) -> dict:
         " FROM price_bars WHERE instrument_key=? AND interval_seconds=?",
         (instrument_key, interval_seconds)).fetchone()
     bars = int(row["bars"] or 0)
+    cut = latest_prune_cut(conn, instrument_key, interval_seconds)
+    removed = {"history_removed_before": cut["cut"] if cut else None,
+               "history_removed_run_id": cut["id"] if cut else None,
+               "history_removed_reason": cut["reason"] if cut else None}
     if not bars:
         return {"bars": 0, "first": None, "last": None, "gaps": None,
                 "contiguous_fraction": None, "usable": False,
-                "note": "no stored bars; run `lele fetch-history` first"}
+                "note": "no stored bars; run `lele fetch-history` first", **removed}
     times = [row["open_time"] for row in conn.execute(
         "SELECT open_time FROM price_bars WHERE instrument_key=? AND interval_seconds=?"
         " ORDER BY open_time", (instrument_key, interval_seconds)).fetchall()]
@@ -1734,7 +1868,8 @@ def stored_bar_span(conn, instrument_key: str, interval_seconds: int) -> dict:
             "contiguous_fraction": round(1 - len(gaps) / max(1, len(times) - 1), 6),
             "usable": not gaps, "completeness": "unknown",
             "completeness_note": "a bounded fetch cannot prove it reached the provider's "
-                                 "first bar, so no frequency claim may be made from this"}
+                                 "first bar, so no frequency claim may be made from this",
+            **removed}
 
 
 def add_cause_scan(conn, *, instrument_key: str, interval_seconds: int, move_hours: int,
@@ -1793,6 +1928,102 @@ def list_cause_scans(conn, instrument_key: str, *, limit: int = 100) -> list[dic
     rows = conn.execute("SELECT * FROM cause_scans WHERE instrument_key=? ORDER BY as_of LIMIT ?",
                         (instrument_key, limit))
     return [dict(row) for row in rows]
+
+
+# --- retention cuts ---
+
+
+def record_prune_run(conn, *, cut: str, reason: str, keep_bars: int, applied_at: str,
+                     instrument_key: str = "", interval_seconds: int = 0,
+                     deleted=None, spans_cut=None, series=None) -> int:
+    """Record that stored history before an instant was deliberately removed.
+
+    The record exists so that "no rows in 2021" can be read as *removed* rather
+    than as *never fetched*, which are different claims and only the first of
+    them is knowable from a registry afterwards. It states the cut, the reason
+    the operator gave, how many rows went from each table, and what remains; it
+    cannot state what the rows contained, so a reader is told the loss is
+    described and not restorable from here.
+    """
+    _observation_text(cut, "cut", 64, True)
+    _observation_text(reason, "reason", 2048, True)
+    _observation_text(applied_at, "applied_at", 64, True)
+    _observation_text(instrument_key, "instrument_key", 512)
+    if type(keep_bars) is not int or keep_bars < 1:
+        raise ValueError("keep_bars must be a positive integer")
+    if type(interval_seconds) is not int or interval_seconds < 0:
+        raise ValueError("interval_seconds must be a nonnegative integer")
+    try:
+        parsed = datetime.fromisoformat(cut)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("cut must be an ISO instant") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("cut must carry a UTC offset; a local time is not an instant")
+    payloads = {}
+    for label, value, empty in (("deleted", deleted, {}), ("spans_cut", spans_cut, {}),
+                                ("series", series, [])):
+        text = json.dumps(value if value is not None else empty, ensure_ascii=True,
+                          sort_keys=True)
+        if len(text) > 65536:
+            raise ValueError(f"{label} exceeds the recordable size for one prune run")
+        payloads[label] = text
+    cursor = conn.execute(
+        "INSERT INTO prune_runs(cut, reason, keep_bars, instrument_key, interval_seconds,"
+        " applied_at, deleted, spans_cut, series) VALUES(?,?,?,?,?,?,?,?,?)",
+        (cut, reason, keep_bars, instrument_key, interval_seconds, applied_at,
+         payloads["deleted"], payloads["spans_cut"], payloads["series"]))
+    return int(cursor.lastrowid)
+
+
+def _has_prune_runs(conn: sqlite3.Connection) -> bool:
+    """Whether this registry records retention cuts at all.
+
+    A database written before the table existed has recorded none, and a read-only
+    open never migrates one into place, so a reader that asked would otherwise fail
+    with "no such table" on a registry that is perfectly sound. Nothing was cut
+    there, because the command did not exist, which is the truth to report.
+    """
+    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prune_runs'"
+                             ).fetchone())
+
+
+def list_prune_runs(conn, limit: int = 50) -> list[dict]:
+    if type(limit) is not int or not 1 <= limit <= 1000:
+        raise ValueError("limit must be an integer from 1 to 1000")
+    if not _has_prune_runs(conn):
+        return []
+    rows = conn.execute("SELECT * FROM prune_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    decoded = []
+    for row in rows:
+        item = dict(row)
+        for field, empty in (("deleted", {}), ("spans_cut", {}), ("series", [])):
+            try:
+                item[field] = json.loads(item.get(field) or json.dumps(empty))
+            except (TypeError, ValueError):
+                item[field] = empty
+        decoded.append(item)
+    return decoded
+
+
+def latest_prune_cut(conn, instrument_key: str, interval_seconds: int) -> dict | None:
+    """The most recent recorded cut that removed history for this series.
+
+    A run scoped to one series applies to that series; a run with no series
+    applies to every series, so it is the later of the two that counts. A window
+    entirely before the returned instant is one this registry has recorded
+    removing, which is a different statement from having nothing there.
+    """
+    _observation_text(instrument_key, "instrument_key", 512, True)
+    if type(interval_seconds) is not int or interval_seconds < 0:
+        raise ValueError("interval_seconds must be a nonnegative integer")
+    if not _has_prune_runs(conn):
+        return None
+    row = conn.execute(
+        "SELECT id, cut, reason, applied_at, keep_bars FROM prune_runs"
+        " WHERE (instrument_key=? AND interval_seconds IN (0, ?)) OR instrument_key=''"
+        " ORDER BY id DESC LIMIT 1",
+        (instrument_key, interval_seconds)).fetchone()
+    return dict(row) if row is not None else None
 
 
 # --- semantic embeddings ---

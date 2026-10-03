@@ -181,6 +181,41 @@ No bundled speculative bank list, automatic global regulator discovery, news cra
 
 Global options **precede** the command: `lele --db PATH --json COMMAND ...`.
 
+Two ways in. `lele` with no command on a terminal, or `lele menu`, opens an
+interactive menu that lists every command by number and name and runs whichever
+you choose; arguments are typed in with shell quoting, no shell is executed, and
+`back` or `quit` returns at any prompt. `lele` with no command and no terminal
+prints the help, and `lele --json` with no command prints the command table as
+data.
+
+**`lele summary` writes and prints a generated inventory of everything above.** It
+is the fastest way to see the whole surface area, and it is regenerated from the
+program rather than maintained by hand:
+
+```bash
+lele summary                          # prints the document, writes lele-summary.md
+lele summary --output report.md       # a chosen destination
+lele summary --format json            # the same report as data
+lele summary --quiet                  # write the file, print only the receipt
+lele summary --force                  # replace an existing file atomically
+```
+
+The file carries every command with its one-line purpose, its full argument
+syntax and whether it reads or writes the registry; the five official datasets
+behind `fetch` with each one's stated coverage limit; the endpoint allowlist,
+which is the real boundary of what the program can reach; the observation
+taxonomy by family; the volatility estimators; the frozen indicator and forecast
+methods; the cited allocation frameworks and the claims this project declines to
+assert; the standing objective at its frozen 0.9 with status `not_achieved`; and
+what the program does not do. It works with no registry at all and says so, rather
+than printing zeros that would be indistinguishable from an empty one. An
+existing file is refused without `--force`, and the target may not be the registry
+or its journal files.
+
+What the document is **not**: evidence that any of it works, and not a coverage
+claim. It says what the program can *attempt*. Every count in it is a count of
+this program's own vocabulary, and its completeness is reported as `unknown`.
+
 ```bash
 lele init
 lele version
@@ -244,6 +279,13 @@ lele --json store-evidence ID binance-futures BTCUSDT --limit 288
 lele --json explain ID --from 2026-09-20T00:00:00+00:00 --to 2026-09-27T00:00:00+00:00 --pre-hours 72
 lele explain ID --from 2026-09-20T00:00:00+00:00 --to 2026-09-27T00:00:00+00:00 --summary
 lele --json capital ID --from 2026-09-20T00:00:00+00:00 --to 2026-09-27T00:00:00+00:00
+lele context series stablecoin_supply
+lele context derive stablecoin_supply --measure change
+lele context derive market_activity --instrument binance:BTCUSDT
+lele context show stablecoin_supply --measure zscore --limit 20
+lele prune plan  --before 2024-01-01T00:00:00+00:00 --keep-bars 400
+lele prune apply --before 2024-01-01T00:00:00+00:00 --reason "storage pressure"
+lele prune runs
 lele --json episodes ID prices.json --evidence evidence.json --threshold-percent 1 --horizon-hours 72
 lele --json prospective forecast --ledger ledger.jsonl --id 1 --path prices.json --evidence evidence.json
 lele export --format csv --output banks.csv --kind bank --limit 1000
@@ -853,10 +895,12 @@ Three design rules exist because ignoring any of them manufactures a finding, an
 - **A window is kept only when the stored channel has at least one observation inside it**, applied identically to moves and controls. Applying it to moves alone makes every condition look enriched, because an older control window that predates a series contributes a guaranteed absence.
 - **Each condition is tested over its own coverage.** A series recorded for the last 180 days is not measured against controls sampled from a year of history where it could not have existed. Conditions are consequently tested on different samples, which the report states per condition.
 - **Controls are spread across the whole span.** Stopping at the first *N* eligible timestamps would place every control in the oldest part of the series and silently remove the most recent period from the comparison.
+- **The size of the control group is reported, not just its existence.** `control_sampling` publishes `requested`, `eligible` (non-move timestamps that existed before thinning), `used`, `dropped_without_coverage` and the move-to-control ratio. A permutation test can only resolve a difference the smaller group can express, so a small `used` against a large `eligible` means the power was set by the requested sample rather than by the stored data. `--controls` defaults to 10, which is a quick look and not a powered comparison; a full run needs `--controls 500`.
+- **A stored move row is re-checked against the stored bars before it is used.** A row records a start and an end but nothing about the bars between them, so a row written by a detector that predates the contiguity check could anchor a pre-window to the wrong date. `moves.verify_stored` re-derives the cadence, the gap set and the horizon from the stored bars and refuses a row whose window spans a missing bar, whose start or end bar is gone, that runs backwards, whose length is not the recorded move length, or that cannot be checked because no bars are stored. `profile_context` and `profile` report the refusals as `unverified_move_windows`, `attribute` as `moves_unverified`, and `explain` as `unverified_rows`.
 
 A group of one window produces no p-value, because it has no permutation variance.
 
-**Measured result, and it is a negative one.** On the stored 4-hour series, every available condition reads `move_share 1.0` against `control_share 1.0` and every p-value is 1.0. At a 24-hour pre-window the daily-cadence context series are **saturated**: a daily observation falls inside every window, so presence carries no information. At a 6- or 12-hour pre-window the same series leave most windows empty, so no usable sample exists. In other words the current context sources have **no discriminative power for this question at any window length**, and the tool now proves that with a proper test and a multiple-testing correction rather than asserting it. The fix is not more statistics but higher-cadence context: the free sentiment and supply series are daily-only, so detecting a pre-move condition requires an hourly or finer source that no free provider here offers.
+**Measured result, and it is a negative one.** On the stored 4-hour series, every available condition reads `move_share 1.0` against `control_share 1.0` and every p-value is 1.0. At a 24-hour pre-window the daily-cadence context series are **saturated**: a daily observation falls inside every window, so presence carries no information. At a 6- or 12-hour pre-window the same series leave most windows empty, so no usable sample exists. In other words the current context sources have **no discriminative power for this question at any window length**, and the tool now proves that with a proper test and a multiple-testing correction rather than asserting it; the 2026-10-02 re-establishment on the daily ladder with a powered control group reaches the same conclusion by the measured-mean route (`AUDIT.md` §12). The fix is not more statistics but higher-cadence context: the free sentiment and supply series are daily-only, so detecting a pre-move condition requires an hourly or finer source that no free provider here offers.
 
 ### Measured conditions, and why presence alone was not enough (M05)
 
@@ -868,18 +912,85 @@ Three further guards, each test-asserted:
 - **A group of one window produces no p-value**, for either the presence or the magnitude test.
 - **The verdict and the per-row flag cannot disagree**: `inference_status` counts only conditions that cleared the correction and are free of the drift confound.
 
-**Measured result on the daily ladder, 24-hour pre-window:**
+**Measured result on the daily ladder, 24-hour pre-window, re-established 2026-10-02** on 3332 Binance daily bars (2017-08-17 to 2026-10-01) with 499 controls used of 1948–2940 eligible:
 
 | tier | move windows | controls | strongest condition | difference | p | adjusted p | drift-confounded |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `p3` | 433 | 99 | `stablecoin_supply` | −$31.5bn | 0.003 | 0.009 | yes |
-| `p5` | 195 | 99 | `stablecoin_supply` | −$36.2bn | 0.002 | 0.006 | yes |
-| `p7` | 96 | 99 | `stablecoin_supply` | −$52.4bn | 0.0005 | 0.0015 | yes |
-| `p11` | 20 | 99 | `stablecoin_supply` | −$53.0bn | 0.021 | 0.042 | yes |
+| `p3` | 526 | 499 | `stablecoin_supply` | −$15.8bn (−7.0%) | 0.031 | **0.093** | yes |
+| `p5` | 252 | 499 | `stablecoin_supply` | −$12.3bn (−5.5%) | 0.251 | 0.673 | yes |
+| `p7` | 124 | 499 | `stablecoin_supply` | −$27.6bn (−12.5%) | 0.127 | 0.382 | yes |
+| `p11` | 30 | 499 | `stablecoin_supply` | +$14.3bn (+6.5%) | 0.728 | 0.728 | yes |
 
-The 3% threshold you asked for is what made this testable at all: 433 move windows against 99 controls, comfortably past the 8-and-8 minimum, where the 11% threshold gave 20. But **nothing survives**. The one condition that comes close is aggregate stablecoin supply, lower before moves than in quiet periods, and its difference grows with move size — which is exactly the shape a real effect would have. It is also a level that rises by an order of magnitude over the sample, drifting 2.1 standard deviations across the compared windows, so the difference is confounded with when the windows sit and is reported as such. Reading it as "capital was pulled out before big moves" would be reading a calendar trend as a mechanism.
+**Nothing survives at any tier**, which is the negative finding, and it holds. `inference_status` reports that no category stands out against the control windows; the fear and greed index gives no significant difference at any tier (adjusted p 0.27 to 0.93) and no drift, and `market_activity` gives none over the one year its coverage reaches.
 
-Two honest consequences. First, a trending level must be stored as a **change** rather than a level to be testable this way, which is what `market_activity` already does and why it is the better-shaped series — but it only covers 180 days, leaving 13 usable windows at `p3`. Second, the conditions that would survive are ones whose value is stationary by construction: a daily change, a rate, a ratio, or a z-score against that asset's own trailing history. None of the currently wired free sources is stored that way.
+**An earlier reading of this table was wrong and has been withdrawn.** It reported a monotone pattern — −$31.5bn at `p3` growing to −$53.0bn at `p11`, adjusted p as low as 0.0015 — and called the monotone shape "exactly the shape a real effect would have". That table used 99 control windows; this one uses 499. With 9 controls the raw p on `stablecoin_supply` was 0.93 and with 499 it is 0.031, so the group size was not a detail. Under a powered control group the difference is negative at three tiers and **positive at the top one**, and no tier reaches adjusted p ≤ 0.05. The monotone shape was an artifact of a thin control group drawn from across a series that rises by an order of magnitude. What survives is the part the earlier reading also reached: the level drifts 2.33 standard deviations across the compared windows, so its difference is confounded with when the windows sit and no amount of sampling makes a trending level testable this way. Reading it as "capital was pulled out before big moves" would be reading a calendar trend as a mechanism. `AUDIT.md` §12 records the re-establishment and the two defects it found.
+
+Two honest consequences. First, a trending level must be stored as a **change** rather than a level to be testable this way, which is what `market_activity` already does and why it is the better-shaped series — but it reaches 365 days, leaving 37 usable windows at `p3` and 1 at `p11`. Second, the conditions that would survive are ones whose value is stationary by construction: a daily change, a rate, a ratio, or a z-score against that asset's own trailing history. That is now built — see the next section — and on this data the stationary comparison is negative too.
+
+### A drifting level, stored as a stationary quantity (v18)
+
+`lele context derive <kind>` turns a stored context series into a **stationary** one, so the drift confound in the table above can be removed instead of merely reported.
+
+```bash
+lele context series stablecoin_supply                 # read-only: what is derivable, what is stored, what was refused
+lele context derive stablecoin_supply                # writes context_measures rows
+lele context show stablecoin_supply --measure change # read-only: the stored rows
+lele causes context 1 --controls 500 --measure change --measure zscore
+```
+
+Two measures are derived, in `Decimal`, from stored rows only:
+
+- **`change`** — the difference from the previous stored value, in a unit that names the interval it spans (`usd_change_per_86400s`). Stationary by construction and it needs no tuned parameter.
+- **`zscore`** — the value in units of its own trailing baseline, through `volatility.z_score`, with the baseline excluding the point being scored and at least 60 observations, the minimum `MIN_BASELINE_Z` already requires of a published z-score.
+
+`rate` and `ratio` are **not offered**, and `context series` says why for each rather than leaving it to look like an oversight: a rate is a change divided by a chosen period, which cannot change a conclusion the change does not already give; a ratio divides by a prior value that a change series crosses zero on, which is where the signal is largest.
+
+Four rules govern every derivation, each the rule the move detector already follows. Cadence is **measured** from the stored timestamps, not read from a label. A difference spanning a hole is **refused, not computed**, so a derived series can be shorter than its parent. Every refusal is **counted by name** — `interrupted`, `no_prior_point`, `baseline_short`, `flat_baseline`, `unit_changed`, `not_increasing`, `repeated_timestamp`, `too_short_to_measure_cadence`, `unparsable_value`, `no_stored_level`, `value_not_representable` — and a test asserts every name in that list is reachable from some input. Re-deriving over unchanged rows **rewrites the same rows**: 8943 stored measures before and after a second full derivation on the live registry.
+
+The derived rows go in a new **`context_measures` table (schema v18), not in `observations`**. A derived quantity is not a second reading of the world, and putting it in `observations` would let a difference and a level be listed side by side as if both had been observed, while every reader of that table — the window scan, the evidence projection, the flow attribution sums — would have no way to know one number is a difference of the other. The parameters are real columns for the reason `volatility_estimates` stores `ddof`: `baseline_observations` is part of the uniqueness key, so a score against 60 points cannot silently overwrite one against 120, and a reader shown two baselines is told so instead of being handed one.
+
+**Measured on the same data, 499 controls, same windows:**
+
+| tier | series | drift before | drift after | raw p | adjusted p |
+| --- | --- | --- | --- | --- | --- |
+| `p3` | `stablecoin_supply` level | 2.334 | — | 0.031 | 0.093 |
+| `p3` | `stablecoin_supply` change | — | **0.039** | 0.161 | 0.193 |
+| `p3` | `stablecoin_supply` zscore | — | 0.723 | 0.099 | 0.157 |
+| `p5` | `stablecoin_supply` change | — | **0.026** | 0.589 | 0.848 |
+| `p7` | `stablecoin_supply` change | — | **0.162** | 0.800 | 0.960 |
+| `p11` | `stablecoin_supply` change | — | **0.048** | 0.797 | 0.967 |
+
+**The drift is gone and the comparison it was blocking is negative.** The level's nearest approach, adjusted 0.093 at `p3`, becomes 0.193 on its change and 0.157 on its z-score; nothing in the measure family survives the correction at any tier. Three things about that number. The measure family corrects **six** tests against the level family's three, so adjusted values are not comparable across the two sections and quoting whichever clears the correction would be selecting on the outcome. `--measure` is **off by default**, and a default run on the same registry is byte-identical to the `--measure` run in `kinds` and `families`, because a feature that made older numbers look cleaner by default would have restated them. And `zscore` only partly removes the drift where `change` removes it, while costing 60 points at the start of the series and its own coverage: 1141 days against the change's 1200.
+
+**A plan item turned out to be false, and is now recorded as measured.** It said extending `market_activity` over years "needs no new provider", because the endpoint accepts any `days`. It does not: keyless, `days=365` returns 366 daily points and `days=400` returns **HTTP 401**. The 365-day cap is the free tier's edge, so `market_activity` still leaves one measured move window at `p11` and no code change makes it otherwise.
+
+Stationarity removes one confound. It does not make any context series a cause of a move, and it does not touch the saturated 24-hour pre-window: every wired context source is daily. `AUDIT.md` §14 records the built layer and the two defects found while building it.
+
+## Retention cuts on stored price history (v19)
+
+`price_bars` and `move_events` grow for as long as a fetcher runs, so there is now a way to cut them that says what it did.
+
+```bash
+lele prune plan  --before 2024-01-01T00:00:00+00:00     # read-only: counts, writes nothing
+lele prune apply --before 2024-01-01T00:00:00+00:00 --reason "storage pressure"
+lele prune runs                                          # what was cut, when, and why
+lele prune plan  --before 2024-01-01T00:00:00+00:00 --series binance:BTCUSDT --interval 1d
+```
+
+A **plan is pure reads** and runs against a read-only mount, so the counts can be inspected before anything is deleted. `apply` counts through the same SQL predicate the plan counted with, checks each delete's row count against the plan, and writes a `prune_runs` row naming the instant, the reason, the per-table counts removed, the per-table counts straddling and what remains. `lele explain` and every stored-bar report then carry the recorded cut, so a window before it says the history was **removed** rather than being indistinguishable from a window that was never fetched.
+
+Six rules, each one a rule some other part of this tool already follows:
+
+- **A row is removed when the last instant it describes is strictly before the cut.** A move is dated by its end, an estimate by the end of its window, a bar by its close, an article by its own instant. A row landing exactly on the cut is kept, so every surviving bar lies wholly at or after it.
+- **A row that straddles the cut is kept and counted.** Deleting it would remove a measurement still mostly inside the retained history; keeping it silently would leave a value that can no longer be reproduced from the remaining bars. `moves.verify_stored` refuses such a row by name when a reader asks.
+- **A cut that would leave a series too short to measure is refused, with the series named.** The floor is `moves.MIN_BASELINE_BARS + 2` — the smallest number of closes the move detector accepts — and a series whose own longest stored window is longer gets a longer floor. Nothing is clamped silently.
+- **The reason is required.** `apply` without `--reason` is refused before a connection is opened.
+- **A deletion is counted, and the count is checked.** `move_causes` hangs off `move_events` by a cascading foreign key, so an article dated after the cut can be removed with its move; the delete set is the union of the aged and attached rows and the breakdown is published.
+- **What is not pruned is named, with the reason.** `observations` and `event_store` are filed evidence, `ingest_runs` is the provenance a bar is attached to, `context_measures` is bounded by its parent series rather than by price history, and `semantic_embeddings` is rebuilt by nothing. All five are quoted in the report and in `lele summary`.
+
+Named refusals, each reported rather than raised: `cut_not_in_the_past`, `unstated_reason`, `too_many_series`, `timestamps_not_canonical`, `cut_precision_not_stored`, `series_below_floor`, `scope_has_no_stored_bars`. A series whose timestamps are stored in two UTC conventions is refused rather than counted with a comparison that would put the boundary in the wrong place, and a test asserts every refusal name is reachable from some input.
+
+Removed: `move_causes`, `move_events`, `volatility_estimates`, `cause_scans`, `price_anomalies`, `price_bars`. A cut is irreversible from inside this tool — the record states how many rows went, not what they contained, so take a `lele backup` first. Measured on a copy of the §12 registry: a cut at 2024-01-01 keeping 400 bars removed 2326 bars and 966 move rows and left 1006. `AUDIT.md` §15 has the detail and the four defects found while building it.
 
 ## Financial-position view (F02)
 
@@ -1063,4 +1174,4 @@ Every change is prepared and verified offline before it is treated as releasable
 .venv/bin/python -m compileall -q lele
 ```
 
-The offline suite covers 485 tests, including SEC observation round-trip, quarter/YTD mismatch, accession/form conflicts and legacy-row safeguards, plus the R02 decision/flow observation bridge (import/validate/project into world-state, 8 tests), the P06 SEC Form 4 extractor (parse/fetch/store, 6 tests), the SEC Form 13F holdings extractor (parse/index/fetch/store, 7 tests), the SEC material-event extractor (metadata/filter/project, 6 tests), the SEC Form D extractor (parse/filter/fetch/store/project, 6 tests), the SEC N-PORT holdings extractor (parse/filter/fetch/store, 6 tests), the P07 USAspending award extractor (exact-UEI matching/fetch/store, 4 tests), the P07 Senate LDA lobbying extractor (party binding/fetch/store, 4 tests) and the P07 Treasury Fiscal Data extractor (macro_release/fetch/store, 6 tests), including GLEIF manager-edge provenance, optional corroboration fallback, local batching and CLI validation, plus OSFI mapping, pagination, evidence links, estimated totals, malformed envelopes and atomic rollback, plus GLEIF category/website and SEC submissions/filings/facts coverage, plus bounded price-export, projection, comparison, event-study and P03 prospective-ledger coverage (29 prospective tests), the evidence-first world-state layer (18 world-state tests), the Binance USD-M futures, CFTC COT and FINRA short interest evidence extractors (25 evidence tests), the GDELT news extractor (9 news tests) and the pump/dump episode engine with non-episode controls (10 episode tests). Live acceptance on 2026-09-17: GLEIF FUND selection (7,233 GB funds, 25 stored), SEC AAPL with `--financials` (FY2026 balance-sheet facts), and the analyze command consuming them (net margin 0.278474 from live data). Live acceptance exercised FDIC fetch → list → show → analyze → export against a temporary database. An empty analysis correctly reported missing fundamentals rather than inventing ratios. GLEIF and World Bank also received small live connector smoke checks during implementation. These checks do not establish worldwide completeness or future API availability.
+The offline suite covers 916 tests, including the stored-move-window verifier and the control-sampling report (`AUDIT.md` §12), SEC observation round-trip, quarter/YTD mismatch, accession/form conflicts and legacy-row safeguards, plus the R02 decision/flow observation bridge (import/validate/project into world-state, 8 tests), the P06 SEC Form 4 extractor (parse/fetch/store, 6 tests), the SEC Form 13F holdings extractor (parse/index/fetch/store, 7 tests), the SEC material-event extractor (metadata/filter/project, 6 tests), the SEC Form D extractor (parse/filter/fetch/store/project, 6 tests), the SEC N-PORT holdings extractor (parse/filter/fetch/store, 6 tests), the P07 USAspending award extractor (exact-UEI matching/fetch/store, 4 tests), the P07 Senate LDA lobbying extractor (party binding/fetch/store, 4 tests) and the P07 Treasury Fiscal Data extractor (macro_release/fetch/store, 6 tests), including GLEIF manager-edge provenance, optional corroboration fallback, local batching and CLI validation, plus OSFI mapping, pagination, evidence links, estimated totals, malformed envelopes and atomic rollback, plus GLEIF category/website and SEC submissions/filings/facts coverage, plus bounded price-export, projection, comparison, event-study and P03 prospective-ledger coverage (29 prospective tests), the evidence-first world-state layer (18 world-state tests), the Binance USD-M futures, CFTC COT and FINRA short interest evidence extractors (25 evidence tests), the GDELT news extractor (9 news tests) and the pump/dump episode engine with non-episode controls (10 episode tests). Live acceptance on 2026-09-17: GLEIF FUND selection (7,233 GB funds, 25 stored), SEC AAPL with `--financials` (FY2026 balance-sheet facts), and the analyze command consuming them (net margin 0.278474 from live data). Live acceptance exercised FDIC fetch → list → show → analyze → export against a temporary database. An empty analysis correctly reported missing fundamentals rather than inventing ratios. GLEIF and World Bank also received small live connector smoke checks during implementation. These checks do not establish worldwide completeness or future API availability.
